@@ -181,12 +181,14 @@ def heuristic_scores(sentences: list[dict], images: list[dict], attachments: lis
     return out
 
 
-def blend(heur: list[list[float]], clef: list[list[float]] | None, drop: set[int] | None = None) -> list[list[float]]:
-    """drop(off_script) 은 Clef 를 섞어도 0 — Clef 는 그림이 문장과 비슷해 보이는지만 보니 남의 회사 공고도 높게 준다."""
+def blend(heur: list[list[float]], clef: list[list[float]] | None, drop: set[int] | None = None, *,
+          news: set[int] | None = None) -> list[list[float]]:
+    """뉴스는 규칙 점수를 유지한다. drop(off_script)은 Clef를 섞어도 0이다."""
     if not clef:
         return heur
     drop = drop or set()
-    return [[0.0 if j in drop else 0.5 * c + 0.5 * h for j, (c, h) in enumerate(zip(crow, hrow))]
+    news = news or set()
+    return [[h if j in news else 0.0 if j in drop else 0.5 * c + 0.5 * h for j, (c, h) in enumerate(zip(crow, hrow))]
             for crow, hrow in zip(clef, heur)]
 
 

@@ -42,11 +42,20 @@ function Rail({ job, sel, onSel }: { job: JobState; sel: StepKey; onSel: (k: Ste
   );
 }
 
-function NowCard({ job, step, onNext }: { job: JobState; step: Step; onNext: () => Promise<void> }) {
+function NowCard({ job, step, onNext, onReload }: { job: JobState; step: Step; onNext: () => Promise<void>; onReload: () => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   const base = `/job/${encodeURIComponent(job.id)}`;
   const shown = step.status === "done" || step.status === "waiting" ? 1 : step.progress;
-  const act = async () => { setBusy(true); try { await onNext(); } finally { setBusy(false); } };
+  const [err, setErr] = useState<string | null>(null);
+  const act = async () => {
+    setBusy(true); setErr(null);
+    try { await onNext(); }
+    catch (e) { setErr((e as Error).message); }
+    finally {
+      try { await onReload(); } catch (e) { setErr((previous) => previous ?? (e as Error).message); }
+      setBusy(false);
+    }
+  };
   const locked = isArchived(job);
   // 읽기 단계: 사실 확인이 막았으면 넘기지 못하고, 확인이 필요하면 단추 이름이 "확인하고 계속"이 된다(11.7).
   const fc = step.key === "read" ? job.factcheck : null;
@@ -78,6 +87,7 @@ function NowCard({ job, step, onNext }: { job: JobState; step: Step; onNext: () 
           ))}
         </ul>
       )}
+      {err && <p role="alert" className="mt-4 text-[13px] text-bad-text">{err}</p>}
       {step.status === "waiting" && (
         <div className="mt-6 flex flex-wrap items-center gap-2 border-t border-line pt-5">
           <span className="mr-auto text-[15px] font-medium">{gateMsg ?? ({ read: "읽은 자료를 확인해 주세요.", script: "대본을 읽고 고칠 곳이 있는지 봐 주세요.", voice: "목소리를 들어 보고 어색한 문장은 다시 녹음하세요.", assets: "그림을 보고 바꿀 것이 있으면 바꿔 주세요.", scenes: "장면 편집기에서 그림 놓은 순서를 확인해 주세요.", review: "최종 영상을 보고 승인해 주세요." } as Record<string, string>)[step.key] ?? "확인하고 계속하세요."}</span>
@@ -255,7 +265,7 @@ export default function Job({ id }: { id: string }) {
       <Rail job={job} sel={step.key} onSel={setSel} />
       <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
         <div className="space-y-6">
-          <NowCard job={job} step={step} onNext={async () => { await api.next(id); await reload(); }} />
+          <NowCard job={job} step={step} onNext={async () => { await api.next(id); }} onReload={reload} />
           {step.key === "read" && job.factcheck && <FactCheckCard job={job} fc={job.factcheck} onChanged={reload} />}
           {step.key === "read" && step.status !== "todo" && step.status !== "running" && <TopicCard job={job} />}
           <section>

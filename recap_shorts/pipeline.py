@@ -225,8 +225,8 @@ class Deps:
     def factcheck_classify(self, title: str, text: str, force: bool = False) -> dict:
         return fc.classify(title, text, force=force)
 
-    def factcheck_verify(self, claims: list[dict]) -> dict:
-        return fc.verify(claims)
+    def factcheck_verify(self, claims: list[dict], *, title: str = "", source_text: str = "") -> dict:
+        return fc.verify(claims, title=title, source_text=source_text)
 
     def factcheck_script_check(self, script: dict, record: dict) -> list[dict]:
         return fc.script_check(script, record)
@@ -243,6 +243,7 @@ class Job:
         self.dir = Path(dir) if dir else self.root / state["id"]   # 구글 드라이브로 옮긴 job 은 드라이브 폴더
         self.state = state
         self.lock = threading.RLock()
+        self.capcut_busy = False  # 외부 내보내기 예약: 재시작 때 남기지 않는다
         self.readonly = False        # 드라이브에 보관된 job 은 고칠 수 없고 state.json 도 다시 쓰지 않는다
 
     @property
@@ -442,7 +443,10 @@ class Ctx:
     def write_json(self, rel: str, obj) -> Path:
         p = self.dir / rel
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+        if rel == "topic.json":
+            fc.atomic_json(p, obj)
+        else:
+            p.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
         return p
 
 
@@ -647,12 +651,21 @@ def run_factcheck(job: Job, deps: Deps, *, force: bool = False) -> dict:
     읽기 단계의 하위 단계이고 '다시 확인'에서도 쓴다. 확인이 실패해도 예외를 내지 않고 failed 기록으로 남긴다."""
     topic_p = job.dir / "topic.json"
     title, text = fc_input(json.loads(topic_p.read_text(encoding="utf-8")))
+    with job.lock:
+        job.state["factcheck_policy"] = fc.POLICY_VERSION
+        job.save()
     job.set_sub("read", "사실 확인", "running")
     cls = ver = None
     try:
         cls = deps.factcheck_classify(title, text, force)
         if force or cls.get("kind") != "general":
-            ver = deps.factcheck_verify(cls.get("claims") or [])
+            if not cls.get("claims"):
+                cls = deps.factcheck_classify(title, text, True)
+                if cls.get("kind") == "general":
+                    cls["kind"] = "uncertain"
+            if not cls.get("claims"):
+                raise fc.FactcheckError("검증할 주장을 찾지 못했습니다. 글을 고치거나 직접 확인해 주세요.")
+            ver = deps.factcheck_verify(cls["claims"], title=title, source_text=text)
         rec = fc.build_record(title, text, cls, ver, forced=force)
     except fc.FactcheckError as e:
         rec = fc.build_record(title, text, cls, ver, error=str(e), forced=force)
@@ -662,16 +675,28 @@ def run_factcheck(job: Job, deps: Deps, *, force: bool = False) -> dict:
     fc.save_record(job.dir, rec)
     topic = json.loads(topic_p.read_text(encoding="utf-8"))      # 확인하는 동안 글이 바뀌었으면 바뀐 글을 그대로 둔다
     topic.update(fc.topic_additions(rec))
-    topic_p.write_text(json.dumps(topic, ensure_ascii=False, indent=2), encoding="utf-8")
-    with job.lock:
-        job.state["factcheck_policy"] = fc.POLICY_VERSION
-        job.save()
+    fc.atomic_json(topic_p, topic)
     if rec["status"] == "failed":
         note = rec.get("error") or "사실 확인에 실패했습니다"
     else:
         note = _FC_NOTE.get(rec["status"], "확인 결과 없음")
     job.set_sub("read", "사실 확인", "error" if rec["status"] in ("stop", "failed") else "done", note)
     return rec
+
+
+def materialize_factcheck_topic(job: Job) -> dict:
+    """record가 단일 원본이다. 중간 종료로 topic이 낡았으면 단계 진입 전에 복구한다."""
+    with job.lock:
+        path = job.dir / "topic.json"
+        topic = json.loads(path.read_text(encoding="utf-8"))
+        if job.state.get("factcheck_policy") is not None:
+            rec = fc.load_record(job.dir)
+            if rec is not None:
+                additions = fc.topic_additions(rec)
+                if any(topic.get(k) != v for k, v in additions.items()):
+                    topic.update(additions)
+                    fc.atomic_json(path, topic)
+        return topic
 
 
 def factcheck_status(job: Job) -> dict:
@@ -718,7 +743,7 @@ def recheck_factcheck(runner: "Runner", job: Job, force: bool = False) -> None:
     """사실 확인을 다시 한다(대기열 거침). 작업이 돌고 있거나 읽기가 끝나지 않았으면 Busy.
     끝나면 읽기를 확인 대기로 두고, 대본 이후 단계는 되돌리고, 지난 뉴스 카드는 지운다."""
     with job.lock:
-        if job.state["status"] == "running":
+        if job.state["status"] == "running" or job.state.get("factcheck_running") or job.capcut_busy:
             raise Busy("지금 작업 중입니다 — 끝난 뒤에 다시 시도하세요")
         if job.step("read")["status"] not in ("waiting", "done"):
             raise Busy("자료 읽기가 끝난 뒤에 사실 확인을 다시 할 수 있습니다")
@@ -729,12 +754,14 @@ def recheck_factcheck(runner: "Runner", job: Job, force: bool = False) -> None:
 def _do_recheck(job: Job, deps: Deps, force: bool) -> None:
     """runner 대기열에서 도는 다시 확인 본체(읽기 하위 단계만 다시 한다)."""
     try:
-        run_factcheck(job, deps, force=force)
+        # 새 record 저장 뒤 종료되더라도 이전 대본·뉴스 카드를 다시 쓰지 않도록 먼저 되돌린다.
         with job.lock:
             if job.step("script")["status"] != "todo":
                 job.reset_from("script")
                 job.log("사실 확인을 다시 함 — 대본부터 다시 합니다")
             _drop_news_cards(job)
+        run_factcheck(job, deps, force=force)
+        with job.lock:
             job.update_step("read", status="waiting", ended_at=now(), progress=1.0)
             job.set_status("waiting")
     finally:
@@ -807,7 +834,7 @@ def _script_factcheck(c: Ctx, script: dict, check: dict, rec: dict) -> tuple[dic
 
 def step_script(c: Ctx) -> None:
     from recap_shorts.script.pipeline import generate_script
-    topic = c.read_json("topic.json")
+    topic = materialize_factcheck_topic(c.job)
     llm = c.deps.script_llm(c.opt["script_llm"], c.opt["script_model"])
     model = getattr(llm, "model", "?")
     c.progress(0.05, f"대본 초안을 쓰는 중 ({model})")
@@ -1156,7 +1183,7 @@ def step_assets(c: Ctx) -> None:
     from recap_shorts.images.captures import make_cards_for_image
     from recap_shorts.render.cards import make_card
     script, timings = c.read_json("script_final/script.json"), c.read_json("voice/timings.json")
-    topic = c.read_json("topic.json")
+    topic = materialize_factcheck_topic(c.job)
     entries: list[dict] = []
     # 1) 캡처 카드 — (가) 문장이 말하는 부분만 잘라 낸 확대 카드 (나) 첨부 그림 통째 (다) 글 머리(제목·조회 줄)
     #    가릴 곳(아이디·프로필·얼굴·번호·욕설 낱말)은 비전 모델이 같은 호출에서 찾아 모자이크한다.
@@ -1417,7 +1444,7 @@ def build_plan(job: Job, deps: Deps, ctx: Ctx | None = None) -> dict:
         except Exception as e:  # noqa: BLE001
             job.log(f"[scenes] Clef 적합도 실패(규칙으로 배치): {errors.reason(e)}")
     drop = arrange.off_script(infos, images, attachments)
-    scores = arrange.blend(heur, clef, drop)
+    scores = arrange.blend(heur, clef, drop, news={j for j, e in enumerate(images) if e.get("role") == "news"})
     sents = timings["sentences"]
     first_cut = next((s["start"] for s in sents if s.get("role") != "hook"), sents[0]["end"])
     counts = []
@@ -1781,6 +1808,9 @@ class Runner:
             st = job.step(key)
             if st["status"] == "done":
                 continue
+            if STEP_KEYS.index(key) > STEP_KEYS.index("read") and factcheck_status(job)["gate"] != "clear":
+                hold_at_read(job)
+                return
             if st["status"] == "waiting":
                 job.set_status("waiting")
                 return
@@ -1834,19 +1864,32 @@ class FactcheckBlocked(RuntimeError):
     """사실 확인 때문에 읽기 단계를 넘길 수 없다. str(e) 는 화면에 그대로 보이는 사유다."""
 
 
+def hold_at_read(job: Job) -> None:
+    """뒤 단계 산출물은 보존하고 읽기 확인 화면으로 돌린다."""
+    job.update_step("read", status="waiting", detail="사실 확인 결과를 확인해 주세요")
+    job.set_status("waiting")
+
+
 def continue_job(runner: Runner, job: Job) -> None:
     """waiting 단계를 done 으로 넘기고 다음으로, error 면 그 단계부터 다시. 실행 중이면 Busy.
     첫 확인 단계가 읽기이고 사실 확인이 막혀 있으면 FactcheckBlocked(상태는 그대로). 주의 판정이면 확인 기록(ack)을 남기고 넘긴다."""
     with job.lock:
-        if job.state["status"] == "running":
+        if job.state["status"] == "running" or job.state.get("factcheck_running") or job.capcut_busy:
             raise Busy("지금 작업 중입니다")
         if job.state["status"] == "done":
             return
         waiting = next((s for s in job.state["steps"] if s["status"] == "waiting"), None)
-        if waiting and waiting["key"] == "read":
-            st = factcheck_status(job)
-            if st["gate"] == "blocked":
-                raise FactcheckBlocked(st["gate_reason"])
+        st = factcheck_status(job)
+        at_read = waiting is not None and waiting["key"] == "read"
+        after_read = job.step("read")["status"] == "done"
+        if at_read or after_read:
+            if st["gate"] == "blocked" or (st["gate"] == "need_ack" and not at_read):
+                if not at_read:
+                    hold_at_read(job)
+                reason = st["gate_reason"]
+                if st["gate"] == "need_ack":
+                    reason = "자료 읽기 화면에서 사실 확인 판정을 확인하고 계속해 주세요."
+                raise FactcheckBlocked(reason)
             if st["gate"] == "need_ack":
                 rec = st["record"]
                 rec["ack"] = {"at": now(), "input_hash": rec["input_hash"]}
@@ -1854,4 +1897,4 @@ def continue_job(runner: Runner, job: Job) -> None:
         if waiting:
             waiting.update(status="done", ended_at=waiting.get("ended_at") or now())
         job.save()
-    runner.submit(job, detail="이어서 진행")
+        runner.submit(job, detail="이어서 진행")

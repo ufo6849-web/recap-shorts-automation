@@ -72,23 +72,39 @@ def route(model: str, has_gemini: bool, has_openrouter: bool) -> tuple[str, str]
     raise GeminiApiError("Gemini API 키가 없습니다 — 화면 오른쪽 위 '설정'에서 넣으세요", kind=errors.NO_KEY, provider="gemini")
 
 
-def _post(model: str, body: dict, timeout: float = 300.0, sleep=time.sleep) -> dict:
+def _remaining(timeout: float, deadline: float | None) -> float:
+    if deadline is None:
+        return timeout
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise GeminiApiError("사실 확인 전체 제한 시간을 넘었습니다", kind=errors.NET)
+    return min(timeout, left)
+
+
+def _retry_sleep(seconds: float, sleep, deadline: float | None) -> None:
+    sleep(_remaining(seconds, deadline))
+    _remaining(seconds, deadline)
+
+
+def _post(model: str, body: dict, timeout: float = 300.0, sleep=time.sleep, *, total_timeout: float | None = None) -> dict:
+    deadline = time.monotonic() + total_timeout if total_timeout is not None else None
     okey = _openrouter_key()                 # 한 번만 읽는다: 다시 읽는 사이 키가 지워지면 빈 키로 나갈 수 있다
     provider, name = route(model, bool(_key_or_empty()), bool(okey))
     if provider == "openrouter":
-        return _post_openrouter(name, body, timeout, sleep, key=okey)
+        return _post_openrouter(name, body, timeout, sleep, key=okey, deadline=deadline)
     url = f"{BASE}/{model}:generateContent"
     last = ""
     for attempt in range(RETRIES + 1):
         try:
             r = requests.post(url, headers={"x-goog-api-key": _key(), "Content-Type": "application/json"},
-                              json=body, timeout=timeout)
+                              json=body, timeout=_remaining(timeout, deadline))
         except requests.RequestException as e:
             last = f"{type(e).__name__}"
             if attempt < RETRIES:
-                sleep(5 * (attempt + 1))
+                _retry_sleep(5 * (attempt + 1), sleep, deadline)
                 continue
             raise GeminiApiError(f"Gemini API 연결 실패({model}): {last}", kind=errors.NET, provider="gemini") from None
+        _remaining(timeout, deadline)
         if r.status_code == 200:
             data = r.json()
             um = data.get("usageMetadata") or {}
@@ -108,7 +124,7 @@ def _post(model: str, body: dict, timeout: float = 300.0, sleep=time.sleep) -> d
             raise GeminiApiError(f"Gemini API 실패({model}): {last}", kind=kind, http=r.status_code, provider="gemini")
         if r.status_code not in (429, 500, 502, 503, 504) or attempt >= RETRIES:
             raise GeminiApiError(f"Gemini API 실패({model}): {last}", kind=kind, http=r.status_code, provider="gemini")
-        sleep(5 * (attempt + 1))
+        _retry_sleep(5 * (attempt + 1), sleep, deadline)
     raise GeminiApiError(f"Gemini API 실패({model}): {last}", provider="gemini")
 
 
@@ -222,20 +238,21 @@ def _error_text(r, data: dict, key: str) -> str:
     return s[:300]
 
 
-def _post_openrouter(or_model: str, body: dict, timeout: float = 300.0, sleep=time.sleep, *, key: str) -> dict:
+def _post_openrouter(or_model: str, body: dict, timeout: float = 300.0, sleep=time.sleep, *, key: str, deadline: float | None = None) -> dict:
     req, seen = _or_request(or_model, body)
     tries, stripped = 0, False
     while True:
         try:
             r = requests.post(OR_URL, headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                              json=req, timeout=timeout)
+                              json=req, timeout=_remaining(timeout, deadline))
         except requests.RequestException as e:
             if tries < RETRIES:
                 tries += 1
-                sleep(5 * tries)
+                _retry_sleep(5 * tries, sleep, deadline)
                 continue
             raise GeminiApiError(f"OpenRouter 연결 실패({or_model}): {type(e).__name__}", kind=errors.NET,
                                  provider="openrouter") from None
+        _remaining(timeout, deadline)
         data = _json_dict(r)
         if r.status_code == 200 and data.get("choices"):
             _log_openrouter(or_model, data, seen)                # 성공한 답 한 번에 한 번만 기록
@@ -248,7 +265,7 @@ def _post_openrouter(or_model: str, body: dict, timeout: float = 300.0, sleep=ti
             continue
         if (r.status_code == 200 or r.status_code == 429 or r.status_code >= 500) and tries < RETRIES:
             tries += 1
-            sleep(5 * tries)
+            _retry_sleep(5 * tries, sleep, deadline)
             continue
         if r.status_code == 402:
             raise GeminiApiError("OpenRouter 잔액이나 키 한도가 모자랍니다", kind=errors.QUOTA, http=402, provider="openrouter")
