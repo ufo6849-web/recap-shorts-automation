@@ -197,11 +197,15 @@ def classify(title: str, source_text: str, *, force: bool = False) -> dict:
         claims.append({"claim": text, "query": str(c.get("query") or "").strip(), "source_quote": quote})
         if len(claims) == MAX_CLAIMS:
             break
-    if kind == "general" and (claims or GENERAL_BLOCK_SIGNALS.search(title + "\n" + source_text)):
+    # 모델의 답과 무관하게 원문의 신호를 남겨 재추출 뒤에도 우회 방어를 유지한다.
+    promoted_by = "signal" if GENERAL_BLOCK_SIGNALS.search(title + "\n" + source_text) else None
+    if kind == "general" and (claims or promoted_by):
         kind = "uncertain"
+        promoted_by = promoted_by or "quotes"
     if kind == "general" and not force and _has_fact_quotes(title, source_text):
         kind = "uncertain"
-    return {"kind": kind, "reason": str(out.get("reason") or "").strip(),
+        promoted_by = "quotes"
+    return {"kind": kind, "reason": str(out.get("reason") or "").strip(), "promoted_by": promoted_by,
             "claims": [{"id": f"C{i}", **c} for i, c in enumerate(claims, 1)]}
 
 

@@ -215,6 +215,74 @@ def test_general_second_pass_pipeline_outcome(tmp_path, monkeypatch, scenario):
     assert P.factcheck_status(job)["gate"] == ("clear" if scenario == "daily" else "blocked")
 
 
+@pytest.mark.parametrize("second", ["empty", "quote", "exception", "bad_json", "ungrounded"])
+@pytest.mark.parametrize("retry_kind", ["uncertain", "general"])
+def test_claimless_uncertain_post_uses_second_pass(tmp_path, monkeypatch, second, retry_kind):
+    job, deps = prepared(tmp_path)
+    title = "한국와서 기싸움에 밀린 순박한 자전거 일본여자"
+    text = "유튜버가 편의점 앞에 자전거를 세웠다. 주차 해프닝 캡처와 잡담 댓글."
+    F.atomic_json(job.dir / "topic.json", {"topic": title, "source_text": text})
+    deps.fc_kind, deps.fc_claims = "uncertain", []
+    classify_calls = []
+    def classify(title, text, force):
+        classify_calls.append(force)
+        return {"kind": retry_kind if force else "uncertain", "claims": [], "reason": "일상 해프닝"}
+    deps.factcheck_classify = classify
+    deps.calls.clear()
+    calls = []
+    def post(model, body, **kw):
+        calls.append(model)
+        prompt = body["contents"][0]["parts"][0]["text"]
+        assert title in prompt and text in prompt and "<untrusted_data>" in prompt
+        if second == "exception":
+            raise RuntimeError("2차 판별 실패")
+        answer = {"quotes": [] if second == "empty" else [text]}
+        if second == "ungrounded":
+            answer = {"quotes": ["원문에 없는 인용"]}
+        raw = "깨진 JSON" if second == "bad_json" else json.dumps(answer, ensure_ascii=False)
+        return {"candidates": [{"content": {"parts": [{"text": raw}]}}]}
+    monkeypatch.setattr(G, "_post", post)
+    rec = P.run_factcheck(job, deps)
+    assert rec["status"] == ("skipped" if second == "empty" else "failed")
+    if second == "empty":
+        assert rec["kind"] == "general" and "분류는 애매했지만 사실 구절이 없어 건너뜀" in rec["reason"]
+    assert classify_calls == [False, True]
+    assert calls == [F.CLASSIFY_MODEL] and not deps.calls.get("factcheck_verify")
+    assert P.factcheck_status(job)["gate"] == ("clear" if second == "empty" else "blocked")
+    assert F.load_record(job.dir) == rec
+
+
+@pytest.mark.parametrize("promoted_by", ["signal", "quotes"])
+@pytest.mark.parametrize("promotion_at", ["initial", "retry"])
+def test_claimless_promotion_survives_retry_and_empty_quotes(tmp_path, monkeypatch, promoted_by, promotion_at):
+    job, deps = prepared(tmp_path)
+    deps.calls.clear()
+    def classify(title, text, force):
+        return {"kind": "uncertain" if not force else "general", "claims": [],
+                "promoted_by": promoted_by if force == (promotion_at == "retry") else None}
+    deps.factcheck_classify = classify
+    second_calls = []
+    monkeypatch.setattr(F, "_has_fact_quotes", lambda *a: second_calls.append(True) or False)
+    rec = P.run_factcheck(job, deps)
+    assert rec["status"] == "failed" and P.factcheck_status(job)["gate"] == "blocked"
+    assert not second_calls and not deps.calls.get("factcheck_verify")
+
+
+def test_general_post_checks_quotes_only_once(tmp_path, monkeypatch):
+    job, deps = prepared(tmp_path)
+    F.atomic_json(job.dir / "topic.json", {"topic": "일상", "source_text": "편의점 앞 자전거 해프닝"})
+    stages = []
+    def ask(stage, *a, **kw):
+        stages.append(stage)
+        return ({"kind": "general", "claims": []} if stage == "분류" else {"quotes": []}), {}
+    monkeypatch.setattr(F, "_ask", ask)
+    deps.factcheck_classify = lambda title, text, force: F.classify(title, text, force=force)
+    deps.calls.clear()
+    rec = P.run_factcheck(job, deps)
+    assert rec["status"] == "skipped" and rec["kind"] == "general"
+    assert stages == ["분류", "2차 판별"] and not deps.calls.get("factcheck_verify")
+
+
 @pytest.mark.parametrize("provider", ["gemini", "openrouter"])
 @pytest.mark.parametrize("stage,budget", [("classify", 30), ("verify", 120)])
 def test_factcheck_deadline_records_failed(tmp_path, monkeypatch, provider, stage, budget):

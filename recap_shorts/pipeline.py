@@ -660,12 +660,19 @@ def run_factcheck(job: Job, deps: Deps, *, force: bool = False) -> dict:
         cls = deps.factcheck_classify(title, text, force)
         if force or cls.get("kind") != "general":
             if not cls.get("claims"):
+                promoted_by = cls.get("promoted_by")
                 cls = deps.factcheck_classify(title, text, True)
+                if promoted_by == "signal" or not cls.get("promoted_by"):
+                    cls["promoted_by"] = promoted_by
                 if cls.get("kind") == "general":
                     cls["kind"] = "uncertain"
             if not cls.get("claims"):
-                raise fc.FactcheckError("검증할 주장을 찾지 못했습니다. 글을 고치거나 직접 확인해 주세요.")
-            ver = deps.factcheck_verify(cls["claims"], title=title, source_text=text)
+                # 이미 찾은 신호·인용은 재판별로 뒤집지 않는다. 강제 확인도 실패를 유지한다.
+                if force or cls.get("promoted_by") or fc._has_fact_quotes(title, text):
+                    raise fc.FactcheckError("검증할 주장을 찾지 못했습니다. 글을 고치거나 직접 확인해 주세요.")
+                cls.update(kind="general", reason="분류는 애매했지만 사실 구절이 없어 건너뜀")
+            else:
+                ver = deps.factcheck_verify(cls["claims"], title=title, source_text=text)
         rec = fc.build_record(title, text, cls, ver, forced=force)
     except fc.FactcheckError as e:
         rec = fc.build_record(title, text, cls, ver, error=str(e), forced=force)
