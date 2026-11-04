@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from recap_shorts import errors, factcheck as F
+from recap_shorts.collect.news_api import outlet_for
 
 TOPIC_FC_VERSION = 1
 CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "topic_factcheck.json"
@@ -215,7 +216,10 @@ def classify_batch(titles: list[str], llm) -> list[str]:
     for start in range(0, len(titles), BATCH):
         chunk = titles[start:start + BATCH]
         kinds = parse_answer(llm(build_prompt(chunk), F.CLASSIFY_MODEL), len(chunk))
-        result.extend("news" if F.GENERAL_BLOCK_SIGNALS.search(t) else k for t, k in zip(chunk, kinds))
+        result.extend(
+            "news" if F.INSTRUCTION_SIGNALS.search(t) or F.INFORMATION_SIGNALS.search(t) else k
+            for t, k in zip(chunk, kinds)
+        )
     return result
 
 
@@ -253,13 +257,15 @@ def live_verify(claims, *, title="", source_text=""):
         public = row.get("public_event") is True
         why = str(row.get("why") or "").strip() if row else "판정 결과가 없습니다."
         sources = F._sources(row.get("sources"), cited)
-        if verdict in ("true", "partly") and not sources:
+        # 엔진과 같은 후처리 전에 원답의 false를 보존해 소재 칩에 전달한다.
+        missing_false = verdict == "false" and not sources
+        if verdict in ("true", "partly", "false") and not sources:
             verdict = "unverified"
             why = "인용된 출처가 없어 확인 불가로 내렸습니다." + (f" {why}" if public and why else "")
         if verdict == "unverified" and public:
             why = "반드시 보도될 일인데 관련 보도를 찾지 못했습니다." + (f" {why}" if why else "")
         results.append({"id": claim["id"], "verdict": verdict, "public_event": public,
-                        "why": why, "sources": sources})
+                        "why": why, "sources": sources, "source_missing_false": missing_false})
     return {"results": results, "model": F.VERIFY_MODEL, "cost_usd": _response_cost(response)}
 
 
@@ -277,9 +283,9 @@ def verdict_record(title: str, kind: str, answer: dict, now: float) -> dict:
     raw_sources = row.get("sources")
     for s in raw_sources if isinstance(raw_sources, list) else []:
         if isinstance(s, dict) and (url := F.safe_url(s.get("url"))):
-            sources.append({"url": url, "outlet": F.outlet_for(url), "date": s.get("date")})
+            sources.append({"url": url, "outlet": outlet_for(url), "date": s.get("date")})
     status = row["verdict"]
-    missing_false = status == "false" and not sources
+    missing_false = not sources and (status == "false" or row.get("source_missing_false") is True)
     if status in ("false", "true", "partly") and not sources:
         status = "unverified"
     return {"v": TOPIC_FC_VERSION, "title_hash": title_hash(title), "kind": kind,

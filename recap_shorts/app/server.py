@@ -143,8 +143,8 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
             except OSError:
                 st["offline"] = True
         st["factcheck_policy"] = st.get("factcheck_policy")
-        st["factcheck"] = P.factcheck_view(job)
         current = P.factcheck_status(job)
+        st["factcheck"] = P.factcheck_view(job, status=current)
         if not current["legacy"]:
             rec = current["record"] or {}
             for step in st["steps"]:

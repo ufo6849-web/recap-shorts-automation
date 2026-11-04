@@ -37,14 +37,43 @@ def load_outlets(path: Path | str = OUTLETS_PATH) -> dict:
     return json.loads(p.read_text(encoding="utf-8")).get("domains", {})
 
 
-def outlet_for(url: str, outlets: dict | None = None) -> str:
+def outlet_for(url: str, outlets: dict | None = None, *, fallback: str = "") -> str:
     outlets = load_outlets() if outlets is None else outlets
-    host = urlparse(url).netloc.lower().split(":")[0]
+    host = (urlparse(url).hostname or "").lower()
     host = re.sub(r"^(?:(?:www|m|mobile)\.)+", "", host)
     for dom in sorted(outlets, key=len, reverse=True):
         if host == dom or host.endswith("." + dom):
             return outlets[dom]
+    fallback = "".join(ch for ch in fallback if unicodedata.category(ch) not in {"Cc", "Cf", "Zl", "Zp"}).strip()
+    if host and 2 <= len(fallback) <= 20 and fallback not in outlets.values():
+        return f"{fallback} ({host})"
     return host
+
+
+def title_and_outlet(title: str, url: str, outlets: dict | None = None, *, outlet: str = "") -> tuple[str, str]:
+    """등록 이름을 우선하며, 미등록 출처의 제목 접미사는 실제 호스트와 함께 표시한다."""
+    outlets = load_outlets() if outlets is None else outlets
+    title = " ".join("".join(" " if ch.isspace() else ch for ch in title
+                             if ch.isspace() or unicodedata.category(ch) not in {"Cc", "Cf"}).split())
+    outlet = " ".join("".join(" " if ch.isspace() else ch for ch in outlet
+                              if ch.isspace() or unicodedata.category(ch) not in {"Cc", "Cf"}).split())
+    suffix = re.fullmatch(r"(.+)\s+(?:[-|]\s+([^|:\r\n]+)|::\s*([^|:\r\n]+?)\s*::)\s*", title)
+    name = (suffix[2] or suffix[3]).strip() if suffix else ""
+    if not 2 <= len(name) <= 20:
+        name = ""
+    host = outlet_for(url, {})
+    registered = outlet_for(url, outlets)
+    # 미등록 도메인이 등록 언론사 이름을 주장하면 접미사도 보존한다.
+    # 표시용 공백은 보존하되, 이름 사이 공백으로 등록 언론사 사칭 검사를 우회하지 못하게 한다.
+    name_key = "".join(name.split())
+    if registered == host and name_key in {"".join(value.split()) for value in outlets.values()}:
+        return title, host
+    resolved = outlet_for(url, outlets, fallback=name)
+    if registered == host and outlet:
+        resolved = outlet  # 사용자가 직접 작성한 --news-json의 명시적 이름
+    if name and (name_key == "".join(resolved.split()) or resolved == f"{name} ({host})"):
+        title = suffix[1].rstrip()
+    return title, resolved
 
 
 def items_from_json(path: Path | str, outlets: dict | None = None) -> list[NewsItem]:
@@ -56,8 +85,9 @@ def items_from_json(path: Path | str, outlets: dict | None = None) -> list[NewsI
         if d.tzinfo is None:
             d = d.replace(tzinfo=timezone.utc)
         url = r.get("url", "")
-        out.append(NewsItem(title=r["title"], description=r.get("description", ""), originallink=url, link=url,
-                            pub_date=d, outlet=r.get("outlet") or outlet_for(url, outlets)))
+        title, outlet = title_and_outlet(r["title"], url, outlets, outlet=r.get("outlet") or "")
+        out.append(NewsItem(title=title, description=r.get("description", ""), originallink=url, link=url,
+                            pub_date=d, outlet=outlet))
     return out
 
 

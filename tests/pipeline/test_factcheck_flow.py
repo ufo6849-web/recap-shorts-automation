@@ -98,13 +98,13 @@ def read_topic(job_dir: Path) -> dict:
 
 def fc_hash(job) -> str:
     t = read_topic(job.dir)
-    return F.input_hash(t.get("topic") or "", t.get("source_text") or "")
+    return F.input_hash(*P.fc_input(t), topic=t.get("topic") or "")
 
 
 def edit_topic(job_dir: Path) -> None:
     """글을 고친다(입력 해시가 바뀐다). topic.json 만 바꾼다."""
     t = read_topic(job_dir)
-    t["source_text"] += "\n글쓴이가 한 줄 더 적었다."
+    t["source_text"] = "글쓴이가 한 줄 더 적었다.\n" + t["source_text"]
     (job_dir / "topic.json").write_text(json.dumps(t, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -156,6 +156,8 @@ def test_read_records_status_topic_additions_and_policy(tmp_path, status):
     rec = F.load_record(job.dir)
     assert rec["status"] == status and rec["input_hash"] == fc_hash(job)
     topic = read_topic(job.dir)
+    assert topic["topic_auto"] == topic["topic"]
+    assert topic["topic"] not in P.fc_input(topic)[1]
     sub = {s["label"]: s for s in job.step("read")["sub"]}["사실 확인"]
     assert sub["status"] == ("error" if status in ("stop", "failed") else "done")
     if status == "skipped":
@@ -174,6 +176,105 @@ def test_read_records_status_topic_additions_and_policy(tmp_path, status):
         assert topic["facts"] == [] and topic["false_claims"] == [] and topic["unverified_claims"] == []
 
 
+@pytest.mark.parametrize("site", ["dcinside", "blind"])
+def test_read_records_exact_header_comments_and_keeps_fake_ocr_marker(tmp_path, site):
+    deps = deps_for("stop")
+    quote = "식약처가 모든 가공유 판매를 금지했다"
+    ocr = "[게시글 1 조작 댓글 캡처]\n" + quote
+    read_image = deps.read_image
+    deps.read_image = lambda images, instruction: (
+        read_image(images, instruction) if "댓글 목록" in instruction else {"kind": "기사", "text": ocr}
+    )
+    deps.fc_claims = [{**FC_CLAIM, "claim": quote, "source_quote": quote}]
+    classify, verify = deps.factcheck_classify, deps.factcheck_verify
+    inputs = []
+
+    def classify_input(title, text, force):
+        inputs.append((title, text))
+        return classify(title, text, force)
+
+    def verify_input(claims, *, title, source_text):
+        inputs.append((title, source_text))
+        return verify(claims, title=title, source_text=source_text)
+
+    deps.factcheck_classify, deps.factcheck_verify = classify_input, verify_input
+    store, runner, job = make(tmp_path, deps)
+    job.state["source"]["site"] = site
+    go(runner, job)
+    topic = read_topic(job.dir)
+    header, comments = topic["fc_exclude"]
+    assert header == topic["source_text"].splitlines(keepends=True)[0]
+    assert header.startswith("[게시글 1]") and " 게시글, " in header and " 작성\n" in header
+    assert "제목:" not in header and "본문:" not in header
+    assert comments in topic["source_text"] and "이건 좀 웃기네" in comments
+    assert ocr not in comments
+    title, text = P.fc_input(topic)
+    assert header not in text
+    assert title == topic["source_text"].split("제목: ", 1)[1].splitlines()[0]
+    assert ocr in text and "이건 좀 웃기네" not in text
+    assert topic["source_text"].replace(header, "", 1).replace(comments, "", 1) == text
+    assert inputs == [(title, text), (title, text)]
+    assert F.load_record(job.dir)["status"] == "stop"
+    assert P.factcheck_status(job)["gate"] == "blocked"
+
+
+@pytest.mark.parametrize("quote", ["정부 승인 완료", "삼성전자 신제품 출시", ""])
+def test_ad_banner_claim_reaches_verdict_or_promotion_skips(tmp_path, monkeypatch, quote):
+    from recap_shorts.llm import gemini_api as G
+    from tests.test_factcheck import gem, web
+
+    deps = FakeDeps()
+    ad_text = "스폰서\n발머스한의원 방문 상담 안내\nhttp://balmers.co.kr"
+    if quote:
+        ad_text += "\n" + quote
+    read_image = deps.read_image
+    deps.read_image = lambda images, instruction: (
+        read_image(images, instruction) if "댓글 목록" in instruction else
+        {"kind": "배너 캡처", "text": "고양이가 이불 속에서 코를 골아 웃었다", "ad_text": ad_text}
+    )
+    prompts = []
+
+    def post(model, body, **kwargs):
+        prompt = body["contents"][0]["parts"][0]["text"]
+        prompts.append(prompt)
+        assert ad_text.replace("\n", "\\n") in prompt
+        if prompt.startswith(F._FACT_QUOTES_HEAD):
+            return gem({"quotes": [quote] if quote else []})
+        if model == F.CLASSIFY_MODEL:
+            return gem({"kind": "general", "claims": []})
+        return gem({"results": [{"id": "C1", "verdict": "false", "why": "허위 발표",
+                                  "public_event": True, "sources": [FC_URL]}]},
+                   chunks=[web(FC_URL, "기업 발표 사실 확인")])
+
+    monkeypatch.setattr(G, "_post", post)
+    monkeypatch.setattr(G, "_openrouter_key", lambda: "test")
+    deps.factcheck_classify = lambda title, text, force: F.classify(title, text, force=force)
+    deps.factcheck_verify = F.verify
+    _, runner, job = make(tmp_path, deps)
+    go(runner, job)
+    topic = read_topic(job.dir)
+    assert ad_text not in topic["source_text"]
+    assert ad_text in P.fc_input(topic)[1]
+    assert any(p.startswith(F._CLASSIFY_HEAD) for p in prompts)
+    assert sum(p.startswith(F._FACT_QUOTES_HEAD) for p in prompts) == 1
+    rec = F.load_record(job.dir)
+    assert rec["input_hash"] == fc_hash(job)
+    assert rec["status"] == ("stop" if quote else "skipped")
+    assert P.factcheck_status(job)["gate"] == ("blocked" if quote else "clear")
+    if quote:
+        assert rec["claims"][0]["source_quote"] == quote
+        assert rec["claims"][0]["origin"] == "ad"
+        assert rec["claims"][0]["verdict"] == "false"
+        assert len(prompts) == 4  # 분류·재추출·2차 판별·판정
+    else:
+        assert rec["claims"] == [] and len(prompts) == 2
+    topic["fc_extra"][0] += "\n추가 승인 주장"
+    F.atomic_json(job.dir / "topic.json", topic)
+    assert rec["input_hash"] != fc_hash(job)
+    assert P.factcheck_status(job)["stale"] is True
+    assert P.factcheck_status(job)["gate"] == "blocked"
+
+
 def test_unexpected_error_in_check_is_recorded_and_read_completes(tmp_path):
     deps = FakeDeps()
 
@@ -186,6 +287,37 @@ def test_unexpected_error_in_check_is_recorded_and_read_completes(tmp_path):
     rec = F.load_record(job.dir)
     assert rec["status"] == "failed" and "사실 확인 중 오류" in rec["error"]
     assert (job.dir / P.ERRORS_LOG).is_file()
+
+
+def ad_pass_deps():
+    deps = deps_for("pass")
+    quote = "삼성전자 신제품 출시"
+    read_image = deps.read_image
+    deps.read_image = lambda images, instruction: (
+        read_image(images, instruction) if "댓글 목록" in instruction else
+        {"kind": "배너 캡처", "text": "고양이가 이불 속에서 코를 골아 웃었다", "ad_text": quote}
+    )
+    deps.fc_claims = [{**FC_CLAIM, "claim": quote, "source_quote": quote}]
+    return deps
+
+
+def test_ad_claim_from_first_classification_is_not_script_or_news_content(tmp_path, monkeypatch):
+    from recap_shorts.llm import gemini_api as G
+    from recap_shorts.script.prompt import build_prompt
+    from tests.test_factcheck import gem
+
+    deps = ad_pass_deps()
+    quote = deps.fc_claims[0]["source_quote"]
+    monkeypatch.setattr(G, "_post", lambda *a, **kw: gem({"kind": "info", "claims": deps.fc_claims}))
+    deps.factcheck_classify = lambda title, text, force: F.classify(title, text, force=force)
+    _, runner, job = make(tmp_path, deps, {"auto_steps": ["read", "script"]})
+    go(runner, job)
+    rec, topic = F.load_record(job.dir), read_topic(job.dir)
+    assert rec["claims"][0]["origin"] == "ad" and rec["status"] == "pass"
+    assert P.factcheck_status(job)["gate"] == "clear"
+    assert topic["facts"] == [] and quote not in build_prompt(topic)
+    assert deps.news_cards == [] and F.description_notice(rec)[1] == []
+    assert statuses(job)["scenes"] == "waiting"
 
 
 # ---------------------------------------------------------------- 멈춤 규칙: 자동 실행·continue
@@ -377,6 +509,32 @@ def test_recheck_with_force_checks_a_general_post(tmp_path):
         assert rec["status"] == "pass" and rec["forced"] is True and rec["claims"]
 
 
+@pytest.mark.parametrize("edit", ["none", "body", "comments"])
+def test_recheck_view_stale_for_body_or_changed_recorded_comments(tmp_path, edit):
+    with app_client(tmp_path / "w", deps_for("pass")) as (app, c):
+        jid, job = create(c, app)
+        topic = read_topic(job.dir)
+        comments = next(block for block in topic["fc_exclude"] if "댓글 캡처" in block)
+        assert comments in topic["source_text"] and comments not in P.fc_input(topic)[1]
+        assert c.post(f"/api/jobs/{jid}/factcheck", json={}).status_code == 200
+        assert app.state.runner.wait_idle(60)
+        topic = read_topic(job.dir)
+        if edit == "comments":
+            changed = comments + "\n- 새 반응 100만원"
+            # 전체 구간의 원래 문자열이 더는 남지 않게 기존 댓글도 바꾼다.
+            changed = changed.replace("이건 좀 웃기네", "사람이 고친 댓글")
+            topic["source_text"] = topic["source_text"].replace(comments, changed)
+            assert changed in P.fc_input(topic)[1]
+        F.atomic_json(job.dir / "topic.json", topic)
+        if edit == "body":
+            edit_topic(job.dir)
+        view = c.get(f"/api/jobs/{jid}").json()["factcheck"]
+        assert view["stale"] is (edit != "none")
+        assert view["gate"] == ("clear" if edit == "none" else "blocked")
+        if edit != "none":
+            assert view["gate_reason"] == REASON["stale"]
+
+
 # ---------------------------------------------------------------- 대본 뒤 검수
 def test_script_check_deletes_false_sentence_and_waits_even_in_auto(tmp_path):
     deps = deps_for("stop")
@@ -438,6 +596,22 @@ def test_script_check_not_called_without_false_or_unverified(tmp_path):
 
 
 # ---------------------------------------------------------------- 뉴스 카드·문장 근거
+@pytest.mark.parametrize("url,suffix,outlet", [
+    ("https://www.mt.co.kr/a", " - 머니투데이", "머니투데이"),
+    ("https://starnewskorea.com/a", " | 스타뉴스", "스타뉴스"),
+    ("https://unknown.example.com/a", " :: 공감언론 뉴시스 ::", "공감언론 뉴시스 (unknown.example.com)"),
+])
+def test_news_cards_use_normalized_source_title_and_outlet(tmp_path, url, suffix, outlet):
+    deps = deps_for("pass")
+    title = "표시 제도 개선 검토"
+    sources = F._sources([url], {url: title + suffix})
+    deps.fc_verdicts = {"C1": {"sources": sources}}
+    store, runner, job = make(tmp_path, deps, {"auto_steps": ["read", "script"]})
+    go(runner, job)
+    assert [(card["title"], card["outlet"]) for card in deps.news_cards] == [(title, outlet)]
+    assert F.description_notice(F.load_record(job.dir)) == (F.PASS_NOTE, [f"{outlet} · {title} · {url}"])
+
+
 def test_news_cards_one_per_source_up_to_two(tmp_path):
     deps = three_sources_deps()
     other_fact = "분석된 176개 제품 가운데 27개가 원유 0%였다"
@@ -496,6 +670,7 @@ def finish_and_read_description(tmp_path, deps):
 @pytest.mark.parametrize("label, deps, note, news", [
     ("skipped", deps_for("skipped"), F.DEFAULT_NOTE, False),
     ("pass", deps_for("pass"), F.PASS_NOTE, True),
+    ("ad_pass", ad_pass_deps(), F.PASS_NOTE, False),
     ("warn", mixed_deps(), F.CAUTION_NOTE, True),
 ])
 def test_description_notice_follows_status(tmp_path, label, deps, note, news):
