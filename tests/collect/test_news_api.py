@@ -20,17 +20,40 @@ def test_outlet_subdomain_suffix():
     assert N.outlet_for("https://unknown.example.com/a", {"yna.co.kr": "연합뉴스"}) == "unknown.example.com"  # 모르면 도메인 그대로
 
 
+@pytest.mark.parametrize("prefix", ["", "www.", "m.", "mobile.", "www.m.mobile."])
+def test_outlet_fallback_strips_leading_prefixes(prefix):
+    assert N.outlet_for(f"https://{prefix.upper()}UNKNOWN.EXAMPLE.COM:8443/a", {}) == "unknown.example.com"
+
+
+@pytest.mark.parametrize("host", ["www2.example.com", "mobile-news.example.com", "news.m.example.com"])
+def test_outlet_fallback_preserves_other_subdomains(host):
+    assert N.outlet_for(f"https://{host}/a", {}) == host
+
+
+@pytest.mark.parametrize("prefix", ["www.", "m.", "mobile."])
+def test_outlet_mapping_uses_normalized_host(prefix):
+    outlets = {"example.com": "가짜일보", f"{prefix}example.com": "접두 제거 전 매핑"}
+    assert N.outlet_for(f"https://{prefix.upper()}EXAMPLE.COM:8443/a", outlets) == "가짜일보"
+
+
+@pytest.mark.parametrize("domain, outlet", [("newsworks.co.kr", "뉴스웍스"), ("chuksannews.co.kr", "축산신문")])
+@pytest.mark.parametrize("prefix", ["", "www.", "m.", "mobile."])
+def test_added_outlets_resolve_to_names(domain, outlet, prefix):
+    assert N.outlet_for(f"https://{prefix}{domain}/a") == outlet
+
+
 def test_default_outlets_file_loads():
     o = N.load_outlets()
     assert o.get("yna.co.kr") == "연합뉴스"
 
 
-def test_chosun_biz_uses_longest_domain_match():
+@pytest.mark.parametrize("prefix", ["", "www.", "m.", "mobile."])
+def test_chosun_biz_uses_longest_domain_match(prefix):
     assert N.outlet_for("https://biz.chosun.com/distribution/food/article") == "조선비즈"
     outlets = {"chosun.com": "조선일보", "biz.chosun.com": "조선비즈"}
     for mapping in (outlets, dict(reversed(list(outlets.items())))):
-        assert N.outlet_for("https://www.biz.chosun.com/a", mapping) == "조선비즈"
-        assert N.outlet_for("https://www.chosun.com/a", mapping) == "조선일보"
+        assert N.outlet_for(f"https://{prefix}biz.chosun.com/a", mapping) == "조선비즈"
+        assert N.outlet_for(f"https://{prefix}chosun.com/a", mapping) == "조선일보"
         assert N.outlet_for("https://notbiz.chosun.com/a", mapping) == "조선일보"
 
 
