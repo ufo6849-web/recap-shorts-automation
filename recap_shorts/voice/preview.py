@@ -42,7 +42,7 @@ def make(work_root: Path, engine: str | None = None, model: str | None = None, v
         voice = voice or settings.gemini_voice()
         if voice not in settings.GEMINI_VOICE_IDS:
             raise PreviewError("모르는 Gemini 목소리입니다")
-        if not settings.MODEL_ID_RE.match(model):
+        if not settings.valid_model_id("tts", model):
             raise PreviewError("모델 이름에 쓸 수 없는 글자가 있습니다")
         if not settings.get_key("gemini_api_key"):
             raise PreviewError("Gemini API 키가 없습니다 — 위 Gemini 칸에 키를 넣으세요", 409)

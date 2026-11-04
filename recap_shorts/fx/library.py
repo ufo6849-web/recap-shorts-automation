@@ -217,8 +217,8 @@ def _gemini_ready() -> bool:
     if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("RECAP_FX_NO_LLM"):
         return False
     try:
-        from recap_shorts.voice.gemini import api_key
-        return bool(api_key())
+        from recap_shorts import settings
+        return settings.llm_ready()          # Gemini 나 OpenRouter 키 중 하나(청취는 글 모델 쪽 호출이라 둘 다 된다)
     except Exception:  # noqa: BLE001
         return False
 

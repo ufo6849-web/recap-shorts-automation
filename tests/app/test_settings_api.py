@@ -33,9 +33,9 @@ def test_get_settings_shape(client, monkeypatch):
     assert r.status_code == 200
     d = body(r)
     assert d["ready"] is False
-    assert d["image_engine"] == "gemini"          # 고른 적 없으면 Gemini 이미지
+    assert d["image_engine"] == "off"             # 고른 적 없고 Gemini 키도 없으면 AI 그림 끔(키가 있으면 Gemini)
     assert [e["id"] for e in d["image_engines"]] == ["local", "gemini", "off"]
-    assert [k["name"] for k in d["keys"]] == ["gemini_api_key", "cf_account_id", "cf_api_token"]
+    assert [k["name"] for k in d["keys"]] == ["gemini_api_key", "openrouter_api_key", "cf_account_id", "cf_api_token"]
     assert all(k["set"] is False and k["source"] is None and k["masked"] is None for k in d["keys"])
     assert d["image_server"] == {"url": "http://127.0.0.1:8791", "up": False}
     assert d["setup_cmd"] == ".venv\\Scripts\\python scripts\\setup_models.py"
@@ -195,13 +195,13 @@ def test_test_unknown_service(client):
 
 def test_health_reports_settings_files(client, monkeypatch):
     h = body(client.get("/api/health"))
-    assert h["gemini_key"] == {"ok": False, "detail": "Gemini API 키 없음 — 설정에서 넣으세요"}
+    assert h["gemini_key"] == {"ok": False, "detail": "Gemini 또는 OpenRouter API 키가 필요합니다"}
     assert set(h["image_server"]) == {"ok", "detail"}
-    assert h["image_server"] == {"ok": True, "detail": "Gemini 이미지로 만듦"}   # ok 는 deps(가짜: 켜짐)
+    assert h["image_server"] == {"ok": False, "detail": "AI 그림 꺼짐 — 캡처 카드만"}   # 키가 없으면 AI 그림 끔
     assert h["asr_model"]["ok"] is True or "받아쓰기 모델" in h["asr_model"]["detail"]
     client.put("/api/settings", json={"keys": {"gemini_api_key": GEMINI}})
     h = body(client.get("/api/health"))
-    assert h["gemini_key"] == {"ok": True, "detail": "Gemini API 키 있음"}
+    assert h["gemini_key"] == {"ok": True, "detail": "Gemini 키로 부름"}
     assert GEMINI not in json.dumps(h)
 
 
@@ -232,7 +232,7 @@ def test_health_turns_red_after_the_key_fails_the_check(client, monkeypatch):
     assert h["image_server"]["ok"] is False          # 기본 AI 그림(Gemini 이미지)도 같은 키라 꺼짐으로
     fake_requests(monkeypatch, Resp(200))
     client.post("/api/settings/test", json={"service": "gemini"})
-    assert body(client.get("/api/health"))["gemini_key"] == {"ok": True, "detail": "Gemini API 키 있음"}
+    assert body(client.get("/api/health"))["gemini_key"] == {"ok": True, "detail": "Gemini 키로 부름"}
     fake_requests(monkeypatch, Resp(401))
     client.post("/api/settings/test", json={"service": "gemini"})
     client.put("/api/settings", json={"keys": {"gemini_api_key": GEMINI + "1"}})     # 다른 키로 바꾸면 확인 전까지는 '키 있음'
