@@ -20,7 +20,9 @@ TTL = 600.0
 
 # 써 본 모델(추천). 맨 앞이 기본값 — settings.MODEL_ROLES 의 default 와 같아야 한다.
 BUILTIN = {
-    "script": [("gemini-4-argon", "Gemini 4 Argon"), ("gemini-3.8-flash", "Gemini 3.8 Flash")],
+    "script": [("gemini-4-argon", "Gemini 4 Argon"), ("gemini-3.8-flash", "Gemini 3.8 Flash"),
+               ("anthropic/claude-opus-5.5", "Claude Opus 5.5 · OpenRouter"),
+               ("anthropic/claude-sonnet-5.5", "Claude Sonnet 5.5 · OpenRouter")],
     "tts": [("gemini-3.8-flash-tts", "Gemini 3.8 Flash TTS"), ("gemini-3.8-flash-lite-tts", "Gemini 3.8 Flash Lite TTS")],
     "image": [("gemini-3.1-flash-image", "Nano Banana 2"), ("gemini-3-pro-image", "Nano Banana Pro"),
               ("gemini-3.1-flash-lite-image", "Nano Banana 2 Lite")],
@@ -116,7 +118,7 @@ def catalog(key: str, refresh: bool = False) -> dict:
         names = {n: d for n, d in (items or []) if role_of(n) == role}
         out = []
         for n, d in rec:
-            if items is None or n in names:
+            if items is None or n in names or "/" in n:          # vendor/name(OpenRouter)은 Gemini 목록과 상관없이 늘 보인다
                 out.append({"id": n, "label": _label(role, n, names.get(n) or d, prices), "recommended": True})
         if role not in ONLY_BUILTIN:
             for n in sorted(set(names) - {n for n, _ in rec}, reverse=True):

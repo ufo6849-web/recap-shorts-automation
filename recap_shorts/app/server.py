@@ -142,19 +142,30 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
         return st
 
     # ---------------------------------------------------------------- 상태 점검
+    # 'gemini_key' 항목은 화면 호환 때문에 이름을 그대로 두고, 뜻은 'AI 키 준비'(설정 readiness)다.
+    HEALTH_VIA = {"gemini": "Gemini 키로 부름", "openrouter": "OpenRouter 키로 부름(Gemini 키 없음)",
+                  "mixed": "Gemini·OpenRouter 키 있음"}
+
     @app.get("/api/health")
     def health():
         out = {}
+        gem_bad = False
         try:
             from recap_shorts import settings
-            key = settings.get_key("gemini_api_key")
-            if not key:
-                out["gemini_key"] = _ok("Gemini API 키 없음 — 설정에서 넣으세요", False)
-            elif bad_keys.get("gemini") == _fingerprint(key):
-                out["gemini_key"] = _ok("Gemini API 키가 맞지 않습니다 — 설정에서 키를 확인하세요", False)
+            rd = settings.readiness()
+            gkey, okey = settings.get_key("gemini_api_key"), settings.get_key("openrouter_api_key")
+            via = rd["via"]
+            used = {"gemini", "openrouter"} if via == "mixed" else ({via} if via else set())
+            gem_bad = "gemini" in used and bool(gkey) and bad_keys.get("gemini") == _fingerprint(gkey)
+            or_bad = "openrouter" in used and bool(okey) and bad_keys.get("openrouter") == _fingerprint(okey)
+            if gem_bad or or_bad:                       # 실제로 쓰일 공급자의 키가 연결 확인에서 틀렸다고 나온 것
+                who = "Gemini" if gem_bad else "OpenRouter"
+                out["gemini_key"] = _ok(f"{who} API 키가 맞지 않습니다 — 설정에서 키를 확인하세요", False)
                 out["gemini_key"]["bad"] = True
+            elif not rd["ok"]:
+                out["gemini_key"] = _ok(rd["reason"], False)
             else:
-                out["gemini_key"] = _ok("Gemini API 키 있음")
+                out["gemini_key"] = _ok(HEALTH_VIA.get(via, "준비됨"))
         except Exception as e:  # noqa: BLE001
             out["gemini_key"] = _ok(f"설정을 읽지 못함 — {errors.screen_text(e, '파일을 읽을 수 없습니다')}", False)
         try:
@@ -183,7 +194,7 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
             from recap_shorts import settings
             from recap_shorts.images import provider
             on = settings.image_engine() != "off"
-            if settings.image_engine() == "gemini" and out["gemini_key"].get("bad"):     # Gemini 이미지는 같은 키를 쓴다
+            if settings.image_engine() == "gemini" and gem_bad:     # Gemini 이미지는 같은 키를 쓴다
                 out["image_server"] = _ok("Gemini 이미지 — Gemini API 키가 맞지 않습니다", False)
             else:
                 out["image_server"] = _ok(provider.engine_detail(), bool(on and deps.image_available()))
@@ -341,7 +352,7 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
 
         from recap_shorts import settings
         service = (body or {}).get("service")
-        if service not in ("gemini", "cloudflare"):
+        if service not in ("gemini", "openrouter", "cloudflare"):
             raise HTTPException(400, f"모르는 service 입니다: {service}")
         out = {"service": service, "ok": False, "message": "키가 없습니다"}
 
@@ -366,6 +377,31 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
                 return fail(f"키가 맞지 않습니다 (HTTP {r.status_code})", key)
             elif r.status_code == 429:
                 bad_keys.pop("gemini", None)
+                return fail("키는 맞지만 사용 한도에 걸렸습니다", key)
+            else:
+                return fail(f"확인 실패 (HTTP {r.status_code})", key)
+        elif service == "openrouter":
+            key = settings.get_key("openrouter_api_key")
+            if not key:
+                return out
+            try:
+                r = rq.get("https://openrouter.ai/api/v1/key", headers={"Authorization": f"Bearer {key}"}, timeout=10)
+            except Exception:  # noqa: BLE001
+                return fail("연결 실패 — 인터넷 연결을 확인하세요", key)
+            if r.status_code == 200:
+                bad_keys.pop("openrouter", None)
+                try:
+                    v = (r.json().get("data") or {}).get("limit_remaining")
+                except Exception:  # noqa: BLE001
+                    v = None
+                left = float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+                out.update(ok=True, message="연결됨" + (f" (남은 한도 ${left:.2f})" if left is not None else ""))
+            elif r.status_code in (401, 403):
+                bad_keys["openrouter"] = _fingerprint(key)
+                return fail(f"키가 맞지 않습니다 (HTTP {r.status_code})", key)
+            elif r.status_code == 402:
+                return fail("OpenRouter 잔액이 모자랍니다 (HTTP 402) — openrouter.ai 에서 확인하세요", key)
+            elif r.status_code == 429:
                 return fail("키는 맞지만 사용 한도에 걸렸습니다", key)
             else:
                 return fail(f"확인 실패 (HTTP {r.status_code})", key)
@@ -420,12 +456,13 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
 
     # ---------------------------------------------------------------- 주제
     def fit_views(items: list[dict], hide_unfit: bool) -> tuple[list[dict], dict]:
-        """채널 대주제 맞춤 점수. Gemini 키가 없으면 부르지 않고 목록만 원래 순서로 보여 준다
+        """채널 대주제 맞춤 점수. 글 모델 키(Gemini 나 OpenRouter)가 하나도 없으면 부르지 않고 목록만 원래 순서로 보여 준다
         (점수를 못 매긴 이유에 'RuntimeError' 같은 것을 화면에 내보내지 않게)."""
+        from recap_shorts import settings
         from recap_shorts.collect import topicfit
         ccfg = topicfit.load_config()
         topic = topicfit.resolve(ccfg)
-        if topic is not None and not has_gemini_key():
+        if topic is not None and not (fake_parts() or settings.llm_ready()):
             return items, {"channel": {"main_topic": topic.id, "label": topic.label},
                            "fit": "unavailable", "fit_note": "키가 없어 맞춤 점수는 건너뜀", "unfit_count": 0}
         with fit_lock:          # 같은 글을 두 요청이 동시에 묻지 않게(뒤 요청은 보관된 점수를 읽는다)
@@ -606,33 +643,40 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
             return with_made(body)
 
     # ---------------------------------------------------------------- jobs
-    def has_gemini_key() -> bool:
-        """영상 만들기에 꼭 필요한 Gemini 키가 있는지 — settings.get_key 와 같은 곳(환경변수 먼저, 그다음 설정 파일)을 본다.
-        앱을 가짜 부품으로 띄운 시험(FakeDeps)에서는 키 파일을 읽지 않는다(시험용 앱은 막지 않는다)."""
-        if type(deps) is not P.Deps:
-            return True
-        try:
-            from recap_shorts import settings
-            return bool(settings.get_key("gemini_api_key"))
-        except Exception:  # noqa: BLE001 — 설정을 못 읽으면 만들지 못한다고 본다
-            return False
+    def fake_parts() -> bool:
+        """가짜 부품(FakeDeps)으로 띄운 시험 앱은 키를 보지 않는다(시험용 앱은 막지 않는다)."""
+        return type(deps) is not P.Deps
 
-    NO_KEY = {"code": "no_key", "message": "Gemini API 키가 없어 만들 수 없습니다 — 오른쪽 위 '설정'에서 키를 넣으세요"}
+    def pipeline_ready() -> dict:
+        """대본·그림 읽기·목소리가 모두 갈 곳이 있는가(설정 readiness). 가짜 부품 시험 앱은 통과."""
+        if fake_parts():
+            return {"ok": True, "reason": None, "via": None}
+        from recap_shorts import settings
+        return settings.readiness()
 
-    def require_key(what: str = "") -> None:
-        """Gemini 를 부르는 곁가지 작업의 공통 검사. what 을 주면 문구에 그 작업 이름을 넣는다."""
-        if has_gemini_key():
+    def no_key_409(message: str) -> HTTPException:
+        return HTTPException(409, {"code": "no_key", "message": message})
+
+    def require_gemini_key(what: str) -> None:
+        """Gemini 전용 곁가지(목소리 다시 녹음·AI 그림 다시 만들기)의 검사 — OpenRouter 로는 부를 수 없다."""
+        from recap_shorts import settings
+        if fake_parts() or settings.get_key("gemini_api_key"):
             return
-        msg = NO_KEY["message"]
-        if what:
-            msg = msg.replace("만들 수 없습니다", f"{what}을(를) 할 수 없습니다")
-        raise HTTPException(409, {**NO_KEY, "message": msg})
+        raise no_key_409(f"Gemini API 키가 없어 {what}을(를) 할 수 없습니다 — 오른쪽 위 '설정'에서 키를 넣으세요")
+
+    def require_llm_key(what: str) -> None:
+        """글 모델(대본 다듬기)의 검사 — Gemini 나 OpenRouter 키 중 하나면 된다."""
+        from recap_shorts import settings
+        if fake_parts() or settings.llm_ready():
+            return
+        raise no_key_409(f"{what}을(를) 할 수 없습니다 — Gemini 또는 OpenRouter API 키가 필요합니다")
 
     @app.post("/api/jobs")
     def create_job(body: dict = Body(...)):
         from recap_shorts.collect import blind, dcinside
-        if not has_gemini_key():
-            raise HTTPException(409, NO_KEY)
+        rd = pipeline_ready()
+        if not rd["ok"]:
+            raise no_key_409(rd["reason"])
         url, site, topic = body.get("url"), "dcinside", ""
         if url:
             try:                                    # 디시 글 주소가 아니면 블라인드로 한 번 더 본다
@@ -687,8 +731,9 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
         if job.archived:
             raise HTTPException(409, ARCHIVED_MSG)
         nxt = next((s["key"] for s in job.state["steps"] if s["status"] != "done"), "")
-        if nxt in P.GEMINI_STEPS and not has_gemini_key():     # 이어 할 단계가 Gemini 를 부르면 키부터
-            raise HTTPException(409, {**NO_KEY, "message": NO_KEY["message"].replace("만들 수 없습니다", f"'{dict(P.STEPS).get(nxt, nxt)}' 단계를 할 수 없습니다")})
+        rd = pipeline_ready()
+        if nxt in P.GEMINI_STEPS and not rd["ok"]:     # 이어 할 단계가 대본·그림 읽기·목소리를 부르면 준비부터
+            raise no_key_409(rd["reason"])
         try:
             P.continue_job(runner, job)
         except P.Busy as e:
@@ -703,8 +748,9 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
         key = body.get("from")
         if key not in ("assets", "scenes", "render"):
             raise HTTPException(400, "from 은 assets·scenes·render 중 하나")
-        if key in P.GEMINI_STEPS and not has_gemini_key():     # AI 그림·청크 찾기·Gemini 목소리를 다시 부르는 단계
-            raise HTTPException(409, NO_KEY)
+        rd = pipeline_ready()
+        if key in P.GEMINI_STEPS and not rd["ok"]:     # AI 그림·청크 찾기·목소리를 다시 부르는 단계
+            raise no_key_409(rd["reason"])
         with job.lock:
             if any(job.step(k)["status"] != "done" for k in P.STEP_KEYS[:P.STEP_KEYS.index(key)]):
                 raise HTTPException(409, "앞 단계가 끝나야 다시 할 수 있습니다")
@@ -797,7 +843,7 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
         job = job_or_404(jid)
         idle_or_409(job)
         if (job.options.get("script_llm") or os.environ.get("RECAP_SCRIPT_LLM") or "gemini_api").strip().lower() in ("gemini_api", "gemini"):
-            require_key("대본 다듬기")       # 대본 LLM 이 agy 면 Gemini 키가 없어도 된다
+            require_llm_key("대본 다듬기")   # 대본 LLM 이 agy 면 키가 없어도 된다
         cur = script_view(job)["script"]
 
         def task(j: P.Job):
@@ -842,7 +888,7 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
             raise HTTPException(400, "variants 는 3개까지(Gemini TTS 하루 한도)")
         tp = json.loads(tpath.read_text(encoding="utf-8"))
         if tp.get("engine") != "supertonic":
-            require_key("목소리 다시 녹음")   # 로컬 목소리(supertonic)면 Gemini 키 없이도 된다
+            require_gemini_key("목소리 다시 녹음")   # 로컬 목소리(supertonic)면 Gemini 키 없이도 된다
 
         def task(j: P.Job):
             j.update_step("voice", status="running", detail=f"문장 {idx} 다시 녹음 중 (요청 {len(variants)}회)")
@@ -1069,7 +1115,7 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
         if not deps.image_available():
             raise HTTPException(503, "AI 그림을 만들 수 없습니다 — 설정에서 엔진을 확인하세요")
         if provider.engine() != "local":
-            require_key("AI 그림 다시 만들기")   # 로컬 그림 서버만 쓰면 Gemini 키가 없어도 된다
+            require_gemini_key("AI 그림 다시 만들기")   # 로컬 그림 서버만 쓰면 Gemini 키가 없어도 된다
         new_hint = (body.get("prompt") or "").strip()
 
         def task(j: P.Job):

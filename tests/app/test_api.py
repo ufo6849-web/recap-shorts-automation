@@ -41,6 +41,8 @@ def read_json(job_dir, rel):
 
 
 def test_health_shape(env):
+    from recap_shorts import settings
+    settings.save({"gemini_api_key": "test-gemini-key-0000000000"})    # 기본 AI 그림(Gemini)이 켜진 상태에서 본다
     client, app, deps = env
     h = client.get("/api/health").json()
     assert set(h) == {"gemini_key", "cf_keys", "gpu", "image_server", "asr_model", "ffmpeg"}
@@ -565,17 +567,38 @@ def test_old_job_without_site_opens_as_dcinside(tmp_path):
         assert [j["id"] for j in client.get("/api/jobs").json()] == [st["id"]]
 
 
-# ---------------------------------------------------------------- Gemini 키 없이 만들기 막기
-def test_no_gemini_key_blocks_create_but_not_fake_apps(tmp_path, monkeypatch):
-    """키가 없으면 만들기를 409 no_key 로 막는다. 가짜 부품(FakeDeps)으로 띄운 앱은 막지 않는다."""
+# ---------------------------------------------------------------- AI 키 없이 만들기 막기(공급자별 경계)
+def test_no_key_blocks_create_with_readiness_reason(tmp_path, monkeypatch):
+    """키가 하나도 없으면 만들기를 409 no_key 로 막는다. 문구는 설정 준비 상태의 이유(Gemini 또는 OpenRouter)다."""
     from recap_shorts import settings
     monkeypatch.setattr(settings, "get_key", lambda name: "")
     real = create_app(work_root=tmp_path / "real", deps=P.Deps(), start_runner=False)
     with TestClient(real) as client:
         r = client.post("/api/jobs", json={"gallery": "baseball_new13", "no": 2101})
-        assert r.status_code == 409 and r.json()["detail"]["code"] == "no_key"
-        assert "설정" in r.json()["detail"]["message"]
+        assert r.status_code == 409
+        assert r.json()["detail"] == {"code": "no_key", "message": "Gemini 또는 OpenRouter API 키가 필요합니다"}
         assert not list((tmp_path / "real").glob("*/state.json"))     # job 폴더도 만들지 않는다
+
+
+def test_gemini_key_alone_allows_create(tmp_path):
+    from recap_shorts import settings
+    settings.save({"gemini_api_key": "test-gemini-key-0000000000"})
+    real = create_app(work_root=tmp_path / "real", deps=P.Deps(), start_runner=False)
+    with TestClient(real) as client:
+        assert client.post("/api/jobs", json={"gallery": "baseball_new13", "no": 2101}).status_code == 200
+
+
+def test_openrouter_key_alone_allows_create(tmp_path, monkeypatch):
+    from recap_shorts import modelfiles, settings
+    monkeypatch.setattr(modelfiles, "ok", lambda mid: True)            # 기본 목소리(로컬)의 모델 파일
+    settings.save({"openrouter_api_key": "sk-or-test-0000000000000000"})
+    real = create_app(work_root=tmp_path / "real", deps=P.Deps(), start_runner=False)
+    with TestClient(real) as client:
+        assert client.post("/api/jobs", json={"gallery": "baseball_new13", "no": 2101}).status_code == 200
+
+
+def test_fake_apps_are_never_blocked(tmp_path):
+    """가짜 부품(FakeDeps)으로 띄운 앱은 키를 보지 않고 막지 않는다."""
     fake = create_app(work_root=tmp_path / "fake", deps=FakeDeps())
     with TestClient(fake) as client:
         r = client.post("/api/jobs", json={"gallery": "baseball_new13", "no": 2101})
@@ -593,9 +616,9 @@ def test_no_gemini_key_blocks_gemini_steps_only(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "get_key", lambda name: "")
     real = create_app(work_root=work, deps=P.Deps(), start_runner=False)
     with TestClient(real) as c:
-        r = c.post(f"/api/jobs/{jid}/continue")            # 다음은 자료 읽기(Gemini)
+        r = c.post(f"/api/jobs/{jid}/continue")            # 다음은 자료 읽기(Gemini 또는 OpenRouter)
         assert r.status_code == 409 and r.json()["detail"]["code"] == "no_key"
-        assert "자료 읽기" in r.json()["detail"]["message"]
+        assert r.json()["detail"]["message"] == "Gemini 또는 OpenRouter API 키가 필요합니다"
         r = c.post(f"/api/jobs/{jid}/rerun", json={"from": "assets"})
         assert r.status_code == 409 and r.json()["detail"]["code"] == "no_key"
         r = c.post(f"/api/jobs/{jid}/rerun", json={"from": "render"})     # Gemini 단계가 아니라 키 때문에 막히지는 않는다

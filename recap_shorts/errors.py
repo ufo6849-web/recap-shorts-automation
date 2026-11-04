@@ -57,14 +57,14 @@ def http_of(e) -> int | None:
 
 
 def kind_for_http(code: int | None, message: str = "") -> str:
-    """HTTP 코드 + 응답 메시지 → 종류. 설정 화면의 키 시험 판단(400/401/403=키, 429=한도)과 같은 기준."""
+    """HTTP 코드 + 응답 메시지 → 종류. 설정 화면의 키 시험 판단(400/401/403=키, 402/429=한도)과 같은 기준."""
     if code is None:
         return NET
     if code in (401, 403):
         return BAD_KEY
     if code == 400 and _BAD_KEY_TEXT.search(message or ""):
         return BAD_KEY
-    if code == 429:
+    if code in (402, 429):                              # 402 = OpenRouter 잔액 부족(결제 한도)
         return QUOTA
     return HTTP
 
@@ -124,15 +124,24 @@ def screen_text(e, fallback: str = DEFAULT_FALLBACK, *, kind: str | None = None,
     k = kind if kind in KINDS else kind_of(e)
     code = http if isinstance(http, int) else http_of(e)
     text = _text_of(e)
+    provider = getattr(e, "provider", None) or ("openrouter" if "openrouter" in text.lower() else "gemini")
     if k == NO_KEY:
+        if provider == "openrouter":
+            return "OpenRouter API 키가 없습니다 — 화면 오른쪽 위 '설정'에서 넣으세요"
         return "Gemini API 키가 없습니다 — 화면 오른쪽 위 '설정'에서 넣으세요"
     if k == BAD_KEY:
+        if provider == "openrouter":
+            return "OpenRouter API 키가 맞지 않습니다 — 오른쪽 위 '설정'에서 키를 확인하세요"
         return "Gemini API 키가 맞지 않습니다 — 오른쪽 위 '설정'에서 키를 확인하세요"
     if k == QUOTA:
+        if provider == "openrouter":
+            return "OpenRouter 잔액·한도가 모자랍니다 — openrouter.ai 에서 확인하세요"
         if "하루 한도" in text:                       # TTS 하루 한도는 초기화 시각까지 알려 준다
             return text.split("HTTP", 1)[0].strip().rstrip(".")
         return "Gemini 사용 한도에 걸렸습니다 — 잠시 뒤에 다시 해 보세요"
     if k == NET:
+        if provider == "openrouter":
+            return "OpenRouter 연결 실패 — 인터넷 연결을 확인하세요"
         who = "Gemini " if "gemini" in text.lower() else ""
         return f"{who}연결 실패 — 인터넷 연결을 확인하세요"
     if k == HTTP:

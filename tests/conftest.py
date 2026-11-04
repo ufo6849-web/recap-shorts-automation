@@ -7,7 +7,7 @@ def _settings_isolated(tmp_path_factory, monkeypatch):
     시험 결과를 바꾸지 않게. 모델 폴더 환경변수도 지운다(저장소 안 models/ 를 그대로 본다)."""
     d = tmp_path_factory.mktemp("settings")
     monkeypatch.setenv("RECAP_SETTINGS_FILE", str(d / "settings.local.json"))
-    for name in ("RECAP_GEMINI_API_KEY", "RECAP_CF_ACCOUNT_ID", "RECAP_CF_API_TOKEN",
+    for name in ("RECAP_GEMINI_API_KEY", "RECAP_OPENROUTER_API_KEY", "RECAP_CF_ACCOUNT_ID", "RECAP_CF_API_TOKEN",
                  "RECAP_SENSEVOICE_DIR", "RECAP_SUPERTONIC_DIR",
                  "RECAP_SCRIPT_MODEL", "RECAP_TTS_MODEL", "RECAP_GEMINI_IMAGE_MODEL", "RECAP_TTS_SID"):
         monkeypatch.delenv(name, raising=False)

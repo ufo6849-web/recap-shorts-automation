@@ -9,7 +9,7 @@ from recap_shorts import settings
 def test_missing_file_means_no_keys():
     assert settings.get_key("gemini_api_key") == ""
     assert settings.key_source("gemini_api_key") is None
-    assert settings.image_engine() == "gemini"
+    assert settings.image_engine() == "off"              # 키가 없으면 AI 그림 끔(키가 있으면 gemini)
 
 
 def test_unknown_name_raises():
@@ -57,7 +57,7 @@ def test_image_engine_falls_back_to_default_on_unknown_value(tmp_path, monkeypat
     p = tmp_path / "s.json"
     p.write_text(json.dumps({"keys": {}, "image_engine": old}), encoding="utf-8")
     monkeypatch.setenv("RECAP_SETTINGS_FILE", str(p))
-    assert settings.image_engine() == "gemini"
+    assert settings.image_engine() == "off"              # 모르는 값은 기본으로(키가 없으니 끔)
 
 
 @pytest.mark.parametrize("bad", ["키", "has space", "tab\there", "\x01control", "x" * 513])
@@ -99,10 +99,10 @@ def test_public_view_masks_and_never_leaks(monkeypatch):
     for secret in ("test-gemini-key-0000000000", "tiny-id7"):
         assert secret not in dumped
     assert [k["name"] for k in v["keys"]] == [k["name"] for k in settings.KEYS]
-    assert [g["id"] for g in v["groups"]] == ["gemini", "cloudflare"]
+    assert [g["id"] for g in v["groups"]] == ["gemini", "openrouter", "cloudflare"]
     assert [e["id"] for e in v["image_engines"]] == ["local", "gemini", "off"]
-    assert {"file", "ready", "keys", "groups", "image_engine", "image_engines", "image_server", "model_roles", "voice", "sfx",
-            "memes", "models", "setup_cmd"} == set(v)
+    assert {"file", "ready", "ready_reason", "keys", "groups", "image_engine", "image_engines", "image_server", "model_roles",
+            "voice", "sfx", "memes", "models", "setup_cmd"} == set(v)
 
 
 def test_public_view_env_source(monkeypatch):
@@ -125,6 +125,6 @@ def test_corrupt_file_is_treated_as_empty(tmp_path, monkeypatch):
     p.write_text("{not json", encoding="utf-8")
     monkeypatch.setenv("RECAP_SETTINGS_FILE", str(p))
     assert settings.get_key("gemini_api_key") == ""
-    assert settings.image_engine() == "gemini"
+    assert settings.image_engine() == "off"
     settings.save({"gemini_api_key": "a" * 20})              # 깨진 파일도 덮어써서 다시 쓸 수 있다
     assert settings.get_key("gemini_api_key") == "a" * 20

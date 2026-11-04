@@ -18,7 +18,7 @@ def test_defaults_match_module_defaults():
     assert settings.model("image") == gemini_image.DEFAULT_MODEL
     for role, rec in G.BUILTIN.items():               # 추천 목록 맨 앞이 기본값
         assert rec[0][0] == settings.model(role)
-    assert settings.voice_engine() == "gemini" and settings.supertonic_sid() == 0
+    assert settings.voice_engine() == "supertonic" and settings.supertonic_sid() == 0    # 키가 없으면 로컬 목소리
 
 
 def test_save_models_and_voice_keeps_other_fields(monkeypatch):
@@ -54,6 +54,7 @@ def test_save_rejects_bad_values(kw, status, msg):
 
 
 def test_supertonic_needs_model_file(monkeypatch):
+    settings.save({"gemini_api_key": "test-gemini-key-0000000000"})      # 기본 목소리가 Gemini 인 상태에서 시험
     monkeypatch.setattr(modelfiles, "ok", lambda mid: False)
     with pytest.raises(settings.SettingsError, match="로컬 목소리 모델이 없습니다"):
         settings.save(voice={"engine": "supertonic"})
@@ -127,7 +128,8 @@ def test_catalog_from_api_orders_recommended_first(monkeypatch):
     c = G.catalog("test-gemini-key-0000000000")
     assert c["source"] == "api"
     script = c["roles"]["script"]
-    assert [i["id"] for i in script] == ["gemini-4-argon", "gemini-3.8-flash"]       # 대본은 써 본 두 모델만
+    assert [i["id"] for i in script] == ["gemini-4-argon", "gemini-3.8-flash", "anthropic/claude-opus-5.5",
+                                         "anthropic/claude-sonnet-5.5"]                # 대본은 써 본 모델만(Claude 는 OpenRouter 키로)
     assert all(i["recommended"] for i in script) and "$2" in script[0]["label"]
     tts = c["roles"]["tts"]
     assert [i["id"] for i in tts] == ["gemini-3.8-flash-tts", "gemini-2.5-flash-preview-tts"]  # 키로 못 쓰는 추천은 뺌
@@ -165,6 +167,7 @@ def _voice_ctx(tmp_path, opt):
 
 def test_voice_step_uses_settings_engine(tmp_path, monkeypatch):
     from recap_shorts import pipeline
+    settings.save({"gemini_api_key": "test-gemini-key-0000000000"})      # 기본 목소리가 Gemini 인 상태에서 시험
     monkeypatch.setattr(modelfiles, "ok", lambda mid: True)
     c, used = _voice_ctx(tmp_path, {})
     pipeline.step_voice(c)
