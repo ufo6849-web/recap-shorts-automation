@@ -182,15 +182,84 @@ def chip(rec: dict) -> dict | None:
 
 
 def _clean_why(why: str | None) -> str | None:
-    """출처는 별도 필드로 보여 주므로 이유의 링크·인용 찌꺼기만 제거한다."""
+    """링크 인용만 지우고 일반 괄호는 보존한다. 모든 순회는 입력 길이에 선형이다."""
     if not why:
         return why
-    why = re.sub(r"\[([^\[\]]*)\]\(https?://[^\s()]+(?:\([^\s()]*\)[^\s()]*)*\)", r"\1", why)
-    why = re.sub(r"https?://[^\s<>()]+", lambda m: m[0][len(m[0].rstrip('.,;:!?')):], why)
-    domain = r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}"
-    why = re.sub(rf"\((?:{domain}|[\s,])*\)", "", why)
-    why = re.sub(r"\s+([.,;:!?])", r"\1", why)
-    return re.sub(r"\s+", " ", why).strip()
+
+    # 괄호 짝과 URL 금지 문자 누계를 미리 계산해 실패한 링크도 재탐색하지 않는다.
+    closes: dict[int, int] = {}
+    stack: list[int] = []
+    forbidden = [0]
+    for i, char in enumerate(why):
+        if char == "(":
+            stack.append(i)
+        elif char == ")" and stack:
+            closes[stack.pop()] = i
+        forbidden.append(forbidden[-1] + int(char.isspace() or char in "<>"))
+    links = {}
+    for match in re.finditer(r"\[([^\[\]]*)\]\((?=https?://)", why):
+        end = closes.get(match.end() - 1)
+        if end is not None and forbidden[end] == forbidden[match.end()]:
+            links[match.start()] = (end + 1, match[1])
+
+    # 링크를 하나의 토큰으로 취급한다. '(' 공백? 링크 (',' 링크)* 공백? ')'만 제거.
+    parts: list[str] = []
+    citation_start: int | None = None
+    after_link = False
+    i = 0
+    while i < len(why):
+        link = links.get(i)
+        if link is not None:
+            i, label = link
+            parts.append(label)
+            if citation_start is not None and not after_link:
+                after_link = True
+            else:
+                citation_start = None
+            continue
+        char = why[i]
+        if char == "(":
+            citation_start = len(parts)
+            after_link = False
+        elif citation_start is not None and not char.isspace():
+            if char == ")" and after_link:
+                del parts[citation_start:]
+                citation_start = None
+                i += 1
+                continue
+            if char == "," and after_link:
+                after_link = False
+            else:
+                citation_start = None
+        parts.append(char)
+        i += 1
+
+    # 맨 URL은 균형 괄호까지 소비한다. 짝 없는 ')'와 끝 문장부호는 본문에 남긴다.
+    text = "".join(parts)
+    parts = []
+    i = 0
+    while i < len(text):
+        if not (text.startswith("http://", i) or text.startswith("https://", i)):
+            parts.append(text[i])
+            i += 1
+            continue
+        start = i
+        depth = 0
+        while i < len(text) and not text[i].isspace() and text[i] not in "<>":
+            char = text[i]
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                if depth == 0:
+                    break
+                depth -= 1
+            i += 1
+        end = i
+        while end > start and text[end - 1] in ".,;:!?":
+            end -= 1
+        parts.append(text[end:i])
+    # 먼저 공백을 줄여 긴 공백 뒤 문장부호 탐색도 선형으로 유지한다.
+    return re.sub(r" ([.,;:!?])", r"\1", " ".join("".join(parts).split()))
 
 
 def _fc_view(rec: dict, now: float) -> dict:

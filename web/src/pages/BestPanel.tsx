@@ -66,10 +66,11 @@ function useTopicCheck(source: TopicSource, data: BestResponse | null, setData: 
     // 새 견적 자체는 무효화하지 않는다.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleKey, data?.fetched_at, sort, hours, pages, setSession]);
-  // 목록이 늦게 도착하거나 다시 열려도 같은 출처의 보관 결과를 적용한다.
+  // 보관 세션은 요약 전용이다. 현재 마운트에서 받은 폴링 결과만 목록에 병합한다.
+  const [polledStatus, setPolledStatus] = useState<TopicFcStatus | null>(null);
   const appliedStatus = useRef<TopicFcStatus | null>(null);
   useEffect(() => {
-    const status = session?.status;
+    const status = polledStatus;
     if (!data || data.source !== source || status?.source !== source || status.run_id !== session?.estimate.run_id || appliedStatus.current === status) return;
     // 한 응답은 한 번 적용한다. 이후 수동 새로고침의 최신 판정을 과거 응답으로 덮지 않는다.
     appliedStatus.current = status;
@@ -86,7 +87,7 @@ function useTopicCheck(source: TopicSource, data: BestResponse | null, setData: 
       checked: items.filter((t) => t.fc && t.fc.kind !== "general" && t.fc.status && t.fc.status !== "failed" && !t.fc.expired).length,
       doubt: items.filter((t) => liveChip(t.fc)?.color === "bad").length,
     } });
-  }, [data, session?.status, session?.estimate.run_id, source, setData]);
+  }, [data, polledStatus, session?.estimate.run_id, source, setData]);
 
   const running = activeRun(session?.status);
   useEffect(() => {
@@ -104,6 +105,7 @@ function useTopicCheck(source: TopicSource, data: BestResponse | null, setData: 
           return;
         }
         setPollError(null);
+        setPolledStatus(status);
         setSession({ ...session, status, counts: countResults(status.results) });
         if (!activeRun(status)) return;
       } catch (e) { if (!dead) setPollError((e as Error).message); }

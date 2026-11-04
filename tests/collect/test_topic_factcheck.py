@@ -3,6 +3,7 @@ import json
 import multiprocessing
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
@@ -1028,10 +1029,11 @@ CLEAN_WHY = '부부가 아동 성범죄자들을 골라 살해했다는 보도�
 @pytest.mark.parametrize("raw,expected", [
     (CITED_WHY, CLEAN_WHY),
     (CITED_WHY + "  https://example.com/report?enc=" + "Ab12%3D" * 100
-     + "  (http://example.com/source?a=1&b=2, https://example.org/other) () ( , ) ", CLEAN_WHY),
+     + "  (http://example.com/source?a=1&b=2, https://example.org/other) () ( , ) ",
+     CLEAN_WHY + " (, ) () (, )"),
     ("[관련 보도](https://example.com/report_(2026)?a=1&b=2)는  확인했습니다.\n"
      "제도(입법예고 단계)와 수치(3.14)는 유지합니다. (hani.co.kr, yna.co.kr) ( , hani.co.kr, , yna.co.kr, )",
-     "관련 보도는 확인했습니다. 제도(입법예고 단계)와 수치(3.14)는 유지합니다."),
+     "관련 보도는 확인했습니다. 제도(입법예고 단계)와 수치(3.14)는 유지합니다. (hani.co.kr, yna.co.kr) (, hani.co.kr,, yna.co.kr, )"),
     ("보도 https://example.com/report?a=1&b=2.  후속 설명", "보도. 후속 설명"),
     (None, None),
     ("", ""),
@@ -1057,3 +1059,40 @@ def test_annotate_and_status_clean_citations_without_rewriting_record(env, monke
     assert state["results"] == [{"no": 1, "fc": items[0]["fc"]}]
     assert items[0]["fc"]["sources"] == rec["sources"]
     assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (CITED_WHY, CLEAN_WHY),
+    ("서버 런타임(Node.js), 수치(3.14), v1.2.3, 날짜(2024.3.1), 제도(입법예고 단계)",
+     "서버 런타임(Node.js), 수치(3.14), v1.2.3, 날짜(2024.3.1), 제도(입법예고 단계)"),
+    ("자세한 내용 https://en.wikipedia.org/wiki/Node.js_(runtime) 참고", "자세한 내용 참고"),
+    ("자세한 내용 https://example.com/a(b)c 참고", "자세한 내용 참고"),
+    ("내용 https://example.com/a(b(c)d)e. 끝", "내용. 끝"),
+    ("설명(참고 https://example.com/a(b)c).", "설명(참고 )."),
+    ("판정 ( [기사](https://example.com/a(b(c))) , [자료](http://x.y) ) 끝", "판정 끝"),
+    ("[관련 글](https://example.com/a(b(c))) 참고", "관련 글 참고"),
+    ("설명(참고 [기사](https://x.y))", "설명(참고 기사)"),
+    ("설명([기사](https://x.y), 추가 설명)", "설명(기사, 추가 설명)"),
+    ("설명([기사](https://x.y),)", "설명(기사,)"),
+    ("([기사](https://x.y) [자료](https://z.y))", "(기사 자료)"),
+    ("(Node.js) () ( , )", "(Node.js) () (, )"),
+])
+def test_clean_why_preserves_text_and_removes_only_link_citations(raw, expected):
+    assert T._clean_why(raw) == expected
+
+
+@pytest.mark.parametrize("raw", [
+    "(" + "a.aa" * 25 + "!",
+    "(" + "a.aa" * 5000 + "!",
+    "[" * 5000,
+    "(" * 5000,
+    "https://" + "(" * 5000,
+    "([a](https://x.y)," * 3000,
+    " " * 20000 + "끝",
+], ids=["domain-25", "domain-5000", "brackets-5000", "parens-5000",
+        "url-parens-5000", "incomplete-citations-3000", "whitespace-20000"])
+def test_clean_why_adversarial_input_finishes_under_100ms(raw):
+    start = time.perf_counter()
+    T._clean_why(raw)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 0.1, f"{len(raw)} characters took {elapsed:.6f}s"
