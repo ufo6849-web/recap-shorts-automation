@@ -91,6 +91,44 @@ def test_read_factcheck_sub_follows_current_gate_without_saving(ready, case, sta
     assert (job.dir / "state.json").read_bytes() == stored
 
 
+@pytest.mark.parametrize("listing", [False, True], ids=["detail", "listing"])
+@pytest.mark.parametrize("overridden", [False, True], ids=["blocked", "clear"])
+def test_view_uses_one_factcheck_status_snapshot(ready, monkeypatch, listing, overridden):
+    app, job, _ = ready
+    rec = F.load_record(job.dir)
+    rec["status"] = "stop"
+    override = {"at": P.now(), "note": "직접 대조함", "input_hash": rec["input_hash"]}
+    rec["override"] = override if overridden else None
+    F.save_record(job.dir, rec)
+    job.set_sub("read", "사실 확인", "error", "저장된 옛 문구")
+    original_status = P.factcheck_status
+    calls = []
+
+    def status_then_change_record(current_job):
+        snapshot = original_status(current_job)
+        calls.append(snapshot)
+        # 최초 계산 직후 다른 요청이 직접 확인을 추가하거나 재확인으로 해제한다.
+        changed = copy.deepcopy(rec)
+        changed["override"] = None if overridden else override
+        F.save_record(current_job.dir, changed)
+        return snapshot
+
+    monkeypatch.setattr(P, "factcheck_status", status_then_change_record)
+    result = (endpoint(app, "/api/jobs")()[0] if listing else
+              endpoint(app, "/api/jobs/{jid}")(job.id))
+
+    assert len(calls) == 1
+    read = next(s for s in result["steps"] if s["key"] == "read")
+    sub = next(s for s in read["sub"] if s["label"] == "사실 확인")
+    assert result["factcheck"]["gate"] == ("clear" if overridden else "blocked")
+    assert result["factcheck"]["override"] == rec["override"]
+    assert "input_hash" not in result["factcheck"]
+    assert (sub["status"], sub["note"]) == (
+        ("done", "직접 확인으로 넘김") if overridden else
+        ("error", "사실 아님 판정 — 고치거나 직접 확인해 주세요"))
+    assert original_status(job)["gate"] == ("blocked" if overridden else "clear")
+
+
 @pytest.mark.parametrize("verdict", ["false", "unverified", "true", "missing"])
 def test_refine_runs_script_factcheck_and_waits_even_when_auto(ready, verdict):
     app, job, deps = ready

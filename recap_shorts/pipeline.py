@@ -732,9 +732,10 @@ def factcheck_status(job: Job) -> dict:
             "missing": policy is not None and record is None, "legacy": policy is None}
 
 
-def factcheck_view(job: Job) -> dict | None:
-    """화면(GET job)의 factcheck: 기록에서 input_hash 를 뺀 값에 판단 키를 더한 것. 기능 이전 작업이거나 읽기 전이면 None."""
-    s = factcheck_status(job)
+def factcheck_view(job: Job, *, status: dict | None = None) -> dict | None:
+    """화면(GET job)의 factcheck: 기록에서 input_hash 를 뺀 값에 판단 키를 더한 것. 기능 이전 작업이거나 읽기 전이면 None.
+    status가 주어지면 이미 계산한 사실 확인 상태를 재사용한다."""
+    s = factcheck_status(job) if status is None else status
     running = bool(job.state.get("factcheck_running"))
     if s["legacy"]:
         return None
