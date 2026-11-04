@@ -25,6 +25,15 @@ def test_default_outlets_file_loads():
     assert o.get("yna.co.kr") == "연합뉴스"
 
 
+def test_chosun_biz_uses_longest_domain_match():
+    assert N.outlet_for("https://biz.chosun.com/distribution/food/article") == "조선비즈"
+    outlets = {"chosun.com": "조선일보", "biz.chosun.com": "조선비즈"}
+    for mapping in (outlets, dict(reversed(list(outlets.items())))):
+        assert N.outlet_for("https://www.biz.chosun.com/a", mapping) == "조선비즈"
+        assert N.outlet_for("https://www.chosun.com/a", mapping) == "조선일보"
+        assert N.outlet_for("https://notbiz.chosun.com/a", mapping) == "조선일보"
+
+
 def test_no_naver_search_left():
     """뉴스 검색 기능을 뺐으므로 뉴스 검색 API 를 부르는 길이 남아 있지 않아야 한다."""
     assert not any(n.lower().startswith(("search_news", "load_naver", "parse_naver")) for n in dir(N))
