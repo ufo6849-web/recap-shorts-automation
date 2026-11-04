@@ -238,3 +238,32 @@ W2 가 고칠 파일:
 | 설명 문구가 Supertonic 이어도 Gemini TTS 로 적는다 | Sol | 실제 엔진으로 |
 
 받아들이지 않은 것: 틀린 Gemini 키와 맞는 OpenRouter 키를 같이 가진 경우의 자동 우회(Sol). 키 상태는 서버 메모리에만 있어 경로 표가 볼 수 없고, health 가 이미 알려 주기 때문이다. 범위 밖에 적었다.
+
+## 결과 (2026-11-04 11:30)
+
+- 구현은 W1(백엔드)·W2(글 캡처·화면) 를 Haiku 5.5 max 작업자가 나눠 맡았다. 리뷰 수정은 F1(백엔드)·F2(화면·문서) 가 했다.
+- 검증은 runner 가 따로 다시 돌렸다(HEAD d38d6d7).
+  - pytest: 902 통과, 5 실패, 7 skip. 실패 5개는 기준선의 Windows 전용 5개와 같고 새 실패는 0이다.
+  - web: typecheck·build 모두 exit 0.
+- 실제 영상 1편(Gemini 키 없음, OpenRouter 키만):
+  - 글은 dcbest 475107 「싱글벙글 이제 사라진다는 물 탄 우유」 다.
+  - 결과물은 `final.mp4` 로 1080×1920, 30fps, 33.2초, h264/aac 다. 샷 11개, 자막 25개다.
+  - 대본은 `anthropic/claude-opus-5.5` 로 2회 불렀다. 사실 가드 통과, 음절 209.
+  - 그림 읽기·가림·대상 사진·품질 검사는 `google/gemini-3.8-flash` 로 18회 불렀다.
+  - 목소리는 Supertonic 이다. 받아쓰기 일치율 0.958, 설명 파일의 출처도 Supertonic 으로 바르게 적혔다.
+  - OpenRouter 비용은 1편 $0.31 이다.
+  - 화면 확인: 설정·첫 화면을 1440·375 폭에서 열었고 콘솔 오류는 0건이다. 설정에서 대본 모델로 Claude Opus 5.5 를 골라 저장했고, OpenRouter 연결 확인 결과는 "연결됨" 이다.
+  - 소리 입력(input_audio) 을 OpenRouter 로 실제로 한 번 불렀다. audio=1 이 기록됐고 비용은 $0.001 이다.
+- Codex(Sol) 리뷰
+  - 1차: 수정 후 병합(높음 1·중간 7·낮음 1). 9건 모두 사실을 확인했다.
+  - 2차(델타): 병합 가능(높음 0·중간 0·낮음 2). 1차 9건 중 8건 해결, 9번은 일부 해결로 판정했다(실제 영상 결과로 보완, 병합 차단 아님).
+
+## 남은 일 (다음 단계)
+
+- [낮음, Sol 2차] Gemini 키를 다른 키로 바꾸면(있음→있음) 설정 화면의 모델 목록이 다시 받아지지 않는다(`web/src/pages/Settings.tsx:562`).
+- [낮음, Sol 2차] mock 의 모델 목록·AI 그림 health 가 키 상태를 따르지 않는다(`web/src/mock/index.ts:48,296`).
+- [낮음] read→review 전체를 HTTP 만 가짜로 돌리는 통합 시험(Sol 1차 9번의 나머지).
+- [낮음] OpenRouter 그룹 설명에 효과음·짤 분석을 넣는다(settings.py·mock·`tests/test_openrouter.py:421` 를 같이 고쳐야 함).
+- [낮음] 효과음·짤 라이브러리와 인기글 패널 화면의 Gemini 전용 문구(`Library.tsx`, `BestPanel.tsx`).
+- [낮음] 설정에서 기본값과 같은 항목(예: AI 그림 안 만듦)을 눌러도 저장되지 않는다. 그래서 나중에 Gemini 키를 넣으면 기본이 Gemini 로 바뀐다.
+- 다음 단계 기능: AI 그림을 나비 ComfyUI 에 연결, Qwen3-TTS 정리.
