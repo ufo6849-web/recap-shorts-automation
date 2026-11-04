@@ -8,7 +8,7 @@
 
 디시인사이드·블라인드 인기글 주소를 넣으면 30~40초짜리 한국어 요약 쇼츠를 만들어 줍니다. 글·댓글 화면을 찍고, 대본을 쓰고, 목소리를 입히고, 영상 파일로 만듭니다.
 
-**필요한 것**: Windows 10/11, 인터넷 연결. 설치 스크립트가 아래를 확인합니다 — Python 3.11 이상, Node.js 20 이상(화면을 한 번 만들 때만. 아래 참고), ffmpeg(영상 인코딩), Microsoft Edge(글 화면 캡처).
+**필요한 것**: Windows 10/11, 인터넷 연결, **AI 키 하나**(Gemini 키나 OpenRouter 키 중 하나 — 아래 4번). 설치 스크립트가 아래를 확인합니다 — Python 3.11 이상, Node.js 20 이상(화면을 한 번 만들 때만. 아래 참고), ffmpeg(영상 인코딩), Microsoft Edge(글 화면 캡처).
 
 1. **받기** — 이 저장소를 압축으로 받아 풀거나 `git clone` 합니다.
 2. **설치** — 폴더를 열고, 주소 표시줄에 `powershell` 을 쳐서 창을 연 뒤:
@@ -19,7 +19,7 @@
 
    화면(`web/dist`)은 git 에 들어 있지 않습니다. 그래서 `git clone` 으로 받았으면 이 단계에서 Node.js 20 이상으로 화면을 한 번 만듭니다(Node.js 가 없으면 https://nodejs.org/ 주소를 알려 주고 멈춤). 처음부터 화면이 들어 있는 압축 파일로 받으면 Node.js 없이 지나갑니다.
 3. **바로가기 열기** — 바탕화면의 **커뮤니티 쇼츠 자동 제작** 을 누릅니다(콘솔 창 없이 앱 창이 뜹니다).
-4. **Gemini 키 넣기** — 앱 오른쪽 위 **설정** 에서 **Gemini API 키** 를 넣고 **저장** 을 누릅니다(저장할 때 연결을 한 번 확인합니다. **연결 확인** 버튼으로 다시 시험할 수 있습니다). 키는 https://aistudio.google.com/apikey 에서 무료로 만듭니다.
+4. **AI 키 넣기** — 앱 오른쪽 위 **설정** 에서 **Gemini API 키** 나 **OpenRouter API 키** 중 하나를 넣고 **저장** 을 누릅니다(저장할 때 연결을 한 번 확인합니다. **연결 확인** 버튼으로 다시 시험할 수 있습니다). Gemini 키는 https://aistudio.google.com/apikey 에서 무료로 만들고, OpenRouter 키는 https://openrouter.ai/settings/keys 에서 만듭니다. Gemini 키 하나로 대본·그림 읽기·목소리·AI 그림이 다 됩니다. OpenRouter 키만 넣으면 대본은 **Claude Opus 5.5** 로 고르고, 목소리는 로컬 목소리(모델 파일을 받아야 함), AI 그림은 **AI 그림 안 만듦** 이 기본입니다. 자세한 것은 [키와 설정](#2-키와-설정).
 5. **영상 만들기** — 디시인사이드·블라인드 글 주소를 넣고 **만들기** 를 누릅니다(**인기글에서 찾기** 로 실시간 베스트 글을 골라도 됩니다). 중간중간 확인 단계에서 멈추니 화면을 보고 넘기면 됩니다.
 
 **블라인드(teamblind.com/kr) 글** 도 같은 8단계로 만듭니다(인기글에서 찾기의 **블라인드 인기글** 탭에서 골라도 됩니다).
@@ -33,7 +33,7 @@
 |---|---|
 | `-DryRun` | 무엇을 할지만 보여 주고 아무것도 바꾸지 않습니다 |
 | `-NoModels` | AI 모델 파일(받아쓰기 약 163 MB) 받기를 건너뜁니다 |
-| `-Supertonic` | 로컬 목소리 모델(약 129 MB)도 함께 받습니다 |
+| `-Supertonic` | 로컬 목소리 모델(약 129 MB)도 함께 받습니다. Gemini 키 없이 OpenRouter 키만 쓸 때 필요합니다 |
 | `-NoShortcut` | 바탕화면 바로가기를 만들지 않습니다 |
 | `-RebuildWeb` | 화면(web/dist)이 이미 있어도 다시 만듭니다 |
 
@@ -93,7 +93,7 @@ python -m recap_shorts.app
 - `python -m playwright install chromium` 이 시스템 라이브러리 오류로 안 되면 `python -m playwright install --with-deps chromium` 을 씁니다(sudo 암호를 묻습니다).
 - ffmpeg 이 PATH 에 있어야 합니다(데비안·칼리: `sudo apt install ffmpeg`). 화면 빌드에는 Node.js 20 이상이 필요합니다.
 - 앱 주소는 http://127.0.0.1:8020 입니다.
-- **OpenRouter 키만으로 쓰기** (Gemini 키 없이): 설정에서 **OpenRouter API 키** 를 넣고, 대본은 **Claude Opus 5.5 · OpenRouter** 를 고릅니다. 목소리는 **로컬 목소리(Supertonic)**, AI 그림은 **AI 그림 안 만듦** 으로 둡니다. Gemini 키가 없으면 목소리와 AI 그림의 기본값도 이 값입니다(설정에서 다르게 고르면 그대로 따릅니다). 그림 읽기와 가림 판단은 OpenRouter 의 Gemini 3.8 Flash 가 맡습니다.
+- **OpenRouter 키만으로 쓰기** (Gemini 키 없이): 설정에서 **OpenRouter API 키** 를 넣고, 대본은 **Claude Opus 5.5 · OpenRouter** 를 고릅니다. 목소리는 **로컬 목소리(Supertonic)**(위 명령의 `setup_models.py --all` 이 모델을 받습니다), AI 그림은 **AI 그림 안 만듦** 으로 둡니다. Gemini 키가 없으면 목소리와 AI 그림의 기본값도 이 값입니다(설정에서 다르게 고르면 그대로 따릅니다). 그림 읽기와 가림 판단은 OpenRouter 의 Gemini 3.8 Flash 가 맡고, 효과음·짤 분석도 OpenRouter 로 됩니다.
 
 ### 2. 키와 설정
 
@@ -103,31 +103,43 @@ python -m recap_shorts.app
 
 | 키 | 환경 변수 | 무엇에 쓰나 | 없으면 |
 |---|---|---|---|
-| Gemini API 키 | `RECAP_GEMINI_API_KEY` | 대본, 목소리(Gemini TTS), 첨부 그림 읽기, AI 그림(그림 만드는 곳이 Gemini 일 때) | 영상을 만들 수 없습니다. **이 키 하나는 꼭 필요합니다** |
+| Gemini API 키 | `RECAP_GEMINI_API_KEY` | 대본(Gemini 4 Argon·3.8 Flash), 첨부 그림 읽기·가림 판단, 효과음·짤 분석, 인기글 채널 맞춤 점수, **목소리(Gemini TTS)**, **AI 그림(Gemini 이미지)**, 쓸 모델 목록 조회 | Gemini·OpenRouter 둘 중 하나는 꼭 필요합니다. 이 키가 없으면 목소리는 로컬 목소리, AI 그림은 안 만듦이 기본입니다 |
+| OpenRouter API 키 | `RECAP_OPENROUTER_API_KEY` | 대본(Claude Opus 5.5·Sonnet 5.5), 첨부 그림 읽기·가림 판단, 효과음·짤 분석, 인기글 채널 맞춤 점수. Gemini 키가 없으면 Gemini 모델도 이 키로 부릅니다 | Gemini·OpenRouter 둘 중 하나는 꼭 필요합니다. 둘 다 없으면 영상을 만들 수 없습니다 |
 | Cloudflare 계정 ID | `RECAP_CF_ACCOUNT_ID` | Clef 점검 — 실시간 베스트 주제 분류, AI 그림 글자 점검, 완성 영상 점검 | 이 점검만 건너뜁니다 |
 | Cloudflare API 토큰 | `RECAP_CF_API_TOKEN` | 위와 같음(계정 ID 와 둘 다 필요) | 위와 같음 |
 
 키를 화면에서 넣으면 **저장할 때 한 번 연결을 시험**합니다(그룹마다). **연결 확인** 버튼으로 다시 시험할 수 있습니다. 결과만 보여 주고 키 값은 어디에도 남기지 않습니다.
 
+**키 조합에 따라 되는 것.** Gemini 키와 OpenRouter 키는 둘 중 하나만 넣어도 영상을 만들 수 있습니다. 고르지 않은 자리는 아래 기본값으로 정해집니다.
+
+| 넣은 키 | 되는 것 | 고르지 않았을 때 |
+|---|---|---|
+| Gemini 키만 | 대본(Gemini 4 Argon·3.8 Flash), 그림 읽기·가림, 효과음·짤 분석, 채널 맞춤 점수, 목소리(Gemini TTS), AI 그림(Gemini 이미지), 쓸 모델 목록 조회 | 목소리 Gemini, AI 그림 Gemini 이미지 |
+| OpenRouter 키만 | 대본(Claude Opus 5.5·Sonnet 5.5, Gemini 모델도 OpenRouter 로), 그림 읽기·가림, 효과음·짤 분석, 채널 맞춤 점수. 목소리는 로컬 목소리만. AI 그림은 로컬 이미지 서버로만 됩니다(Gemini 이미지는 Gemini 키 필요). 쓸 모델 목록은 써 본 모델만 | 목소리 로컬 목소리(Supertonic), AI 그림 안 만듦 |
+| 둘 다 | 위 전부. Claude 는 OpenRouter 로, Gemini 모델·목소리·그림은 Gemini 로 | 목소리 Gemini, AI 그림 Gemini 이미지 |
+
+- OpenRouter 키만 쓰면 목소리가 로컬 목소리라서 로컬 목소리 모델을 받아야 영상을 만들 수 있습니다. 설정 → **모델 파일** 에서 받거나, 설치 때 `-Supertonic`(리눅스는 `python scripts/setup_models.py --all`)을 씁니다. 받기 전에는 "로컬 목소리(Supertonic) 모델이 없습니다"라고 나옵니다.
+- 고른 값은 기본값보다 우선합니다. 예를 들어 Gemini 키만 넣고도 목소리를 로컬 목소리로 고를 수 있습니다(모델 파일을 받은 뒤).
+
 **AI 그림을 어디서 만들지** (설정 화면의 선택):
 
 | 값 | 뜻 |
 |---|---|
-| 로컬 이미지 서버 | 로컬 이미지 서버(`RECAP_IMAGE_URL`, 기본 `http://127.0.0.1:8791`)로 만듭니다. 서버가 사용 한도에 걸리면 Gemini 로 대신 만듭니다 |
-| Gemini 이미지 (기본) | Gemini 이미지로 만듭니다 |
-| AI 그림 안 만듦 | 글 캡처·사진만 씁니다 |
+| 로컬 이미지 서버 | 로컬 이미지 서버(`RECAP_IMAGE_URL`, 기본 `http://127.0.0.1:8791`)로 만듭니다. 서버가 사용 한도에 걸리면 Gemini 키가 있을 때 Gemini 로 대신 만듭니다 |
+| Gemini 이미지 | Gemini 이미지로 만듭니다(Gemini 키 필요). Gemini 키가 있을 때 기본입니다 |
+| AI 그림 안 만듦 | 글 캡처·사진만 씁니다. Gemini 키가 없을 때 기본입니다 |
 
-**Gemini 이미지는 돈이 듭니다**(장당 과금). 한 번도 고르지 않았으면 Gemini 이미지로 만드니, 무료로만 쓰려면 **AI 그림 안 만듦** 을 고르세요. 로컬 이미지 서버는 따로 띄우는 이미지 생성 서버이며 이 저장소에 들어 있지 않습니다(요청·응답 형식은 `recap_shorts/images/provider.py` 참고) — 없어도 영상은 만들어집니다. (예전의 "자동"은 없앴습니다. 설정 파일에 남아 있으면 Gemini 이미지로 봅니다.)
+**Gemini 이미지는 돈이 듭니다**(장당 과금). 고르지 않았을 때는 Gemini 키가 있으면 Gemini 이미지, 없으면 AI 그림 안 만듦입니다. 무료로만 쓰려면 **AI 그림 안 만듦** 을 고르세요. 로컬 이미지 서버는 따로 띄우는 이미지 생성 서버이며 이 저장소에 들어 있지 않습니다(요청·응답 형식은 `recap_shorts/images/provider.py` 참고) — 없어도 영상은 만들어집니다. (예전의 "자동"은 없앴습니다. 설정 파일에 남아 있으면 모르는 값으로 보고 위의 기본대로 정합니다.)
 
-**쓸 모델** (설정 화면의 '쓸 모델'). 고르면 바로 저장되고 다음에 만드는 영상부터 씁니다. 목록은 넣은 Gemini 키로 쓸 수 있는 모델(Gemini API 모델 목록, 무료 조회)에서 가져오고, 키가 없으면 써 본 모델만 보여 줍니다.
+**쓸 모델** (설정 화면의 '쓸 모델'). 고르면 바로 저장되고 다음에 만드는 영상부터 씁니다. 목록은 Gemini 키가 있으면 그 키로 쓸 수 있는 모델(Gemini API 모델 목록, 무료 조회)에서 가져오고, Gemini 키가 없으면 써 본 모델만 보여 줍니다. Claude 두 개는 OpenRouter 모델이라 키와 상관없이 목록에 보이고, 고르면 OpenRouter 키가 필요합니다.
 
 | 자리 | 기본 | 고를 수 있는 것 |
 |---|---|---|
-| 대본 | `gemini-4-argon` | `gemini-4-argon`, `gemini-3.8-flash` 두 가지 (비용 차이는 아래 [비용](#비용)) |
-| 목소리 | Gemini 목소리 Charon, `gemini-3.8-flash-tts` | Gemini 목소리 30개(이름 — 설명)와 TTS 모델, 또는 **로컬 목소리(Supertonic)** 와 목소리 번호 0~9 — 로컬 목소리는 모델 파일을 받은 뒤에만 고를 수 있습니다(무료, 이 컴퓨터에서 만듦) |
-| 이미지 | `gemini-3.1-flash-image` (Nano Banana 2) | Gemini 이미지 모델 (예: Nano Banana Pro, 2 Lite). AI 그림 만드는 곳이 Gemini 일 때와 로컬 서버가 한도에 걸려 대신 만들 때 씁니다 |
+| 대본 | `gemini-4-argon` | `gemini-4-argon`, `gemini-3.8-flash`(Gemini 키가 없으면 OpenRouter 로 부름), **Claude Opus 5.5**·**Claude Sonnet 5.5**(`anthropic/claude-opus-5.5`·`anthropic/claude-sonnet-5.5`, OpenRouter 키 필요). 비용 차이는 아래 [비용](#비용) |
+| 목소리 | Gemini 키가 있으면 Gemini 목소리 Charon·`gemini-3.8-flash-tts`, 없으면 로컬 목소리(Supertonic) 0번 | Gemini 목소리 30개(이름 — 설명)와 TTS 모델(Gemini 키 필요), 또는 **로컬 목소리(Supertonic)** 와 목소리 번호 0~9 — 로컬 목소리는 모델 파일을 받은 뒤에만 고를 수 있습니다(무료, 이 컴퓨터에서 만듦) |
+| 이미지 | `gemini-3.1-flash-image` (Nano Banana 2) | Gemini 이미지 모델 (예: Nano Banana Pro, 2 Lite). AI 그림 만드는 곳이 Gemini 일 때와 로컬 서버가 한도에 걸려 대신 만들 때 씁니다(Gemini 키 필요) |
 
-**효과음·짤** (설정 화면의 '효과음'·'짤'). **폴더 고르기**(Windows 폴더 창) 또는 경로를 붙여 넣어 내 폴더를 넣으면 그 폴더가 먼저이고, 폴더를 여러 개 넣을 수 있습니다. 폴더에 `manifest.json` 이 없으면 프로그램이 Gemini 로 소리를 듣고(짤은 그림을 보고) 종류·뜻을 매겨 따로 꾸러미(`assets_local/analyzed/`)를 만듭니다. 내 원래 폴더는 바뀌지 않고, 소리·그림 6개에 Gemini 요청 1번입니다. 효과음은 종류마다 몇 개씩만 고르고(같은 소리·욕설·음악·권리자가 분명한 소리는 뺌), 짤은 혐오·성적·잔인한 그림과 같은 그림을 뺍니다. 끝나면 결과 화면에서 종류·뜻을 고치거나 빼고 다시 넣을 수 있습니다. Gemini 키가 없으면 효과음은 파일 이름(`pop_01.wav`, 종류 이름 폴더 `pop\아무이름.mp3`)으로 종류를 정하고, 짤은 파일 이름을 뜻으로 씁니다. 규칙은 [`docs/library_analysis.md`](docs/library_analysis.md). 효과음 폴더를 고르지 않으면 저장소에 같이 든 기본 꾸러미(`assets/sfx_packs/`)에서 고릅니다. **내 폴더에 없는 종류는 기본 효과음으로 채우기**(기본 켬)를 끄면 그 자리는 효과음 없이 지나갑니다. 고른 폴더가 없어지면 기본으로 대신합니다. 내 폴더의 소리·짤은 저작권 점검(검수 화면 경고)을 하지 않습니다.
+**효과음·짤** (설정 화면의 '효과음'·'짤'). **폴더 고르기**(Windows 폴더 창) 또는 경로를 붙여 넣어 내 폴더를 넣으면 그 폴더가 먼저이고, 폴더를 여러 개 넣을 수 있습니다. 폴더에 `manifest.json` 이 없으면 프로그램이 AI 로 소리를 듣고(짤은 그림을 보고) 종류·뜻을 매겨 따로 꾸러미(`assets_local/analyzed/`)를 만듭니다. 내 원래 폴더는 바뀌지 않고, 소리·그림 6개에 AI 요청 1번입니다(Gemini 나 OpenRouter 키). 효과음은 종류마다 몇 개씩만 고르고(같은 소리·욕설·음악·권리자가 분명한 소리는 뺌), 짤은 혐오·성적·잔인한 그림과 같은 그림을 뺍니다. 끝나면 결과 화면에서 종류·뜻을 고치거나 빼고 다시 넣을 수 있습니다. AI 키(Gemini·OpenRouter)가 하나도 없으면 효과음은 파일 이름(`pop_01.wav`, 종류 이름 폴더 `pop\아무이름.mp3`)으로 종류를 정하고, 짤은 파일 이름을 뜻으로 씁니다. 규칙은 [`docs/library_analysis.md`](docs/library_analysis.md). 효과음 폴더를 고르지 않으면 저장소에 같이 든 기본 꾸러미(`assets/sfx_packs/`)에서 고릅니다. **내 폴더에 없는 종류는 기본 효과음으로 채우기**(기본 켬)를 끄면 그 자리는 효과음 없이 지나갑니다. 고른 폴더가 없어지면 기본으로 대신합니다. 내 폴더의 소리·짤은 저작권 점검(검수 화면 경고)을 하지 않습니다.
 
 목소리 아래 **미리듣기** 는 고른 목소리로 예시 문장(직접 고쳐 쓸 수 있음)을 만들어 바로 틉니다. Gemini 목소리는 새 소리를 만들 때마다 요청 1회(하루 한도에 들어감)이고, 같은 목소리·모델·문장은 `work/_preview/` 에 저장해 둔 소리를 다시 틉니다.
 
@@ -142,7 +154,7 @@ python -m recap_shorts.app
 ```
 
 - 받아쓰기 모델이 없으면 발음 확인·어절 컷·목소리 자르기 다듬기를 건너뜁니다(영상은 만들어짐).
-- 로컬 목소리 모델이 없으면 로컬 목소리 엔진만 못 씁니다(기본 목소리는 Gemini).
+- 로컬 목소리 모델이 없으면 로컬 목소리 엔진만 못 씁니다. Gemini 키가 없으면 기본 목소리가 로컬 목소리라서, 이 모델을 받기 전에는 영상을 만들 수 없습니다.
 
 바꾸고 싶을 때만 넣는 설정(환경 변수):
 
@@ -160,7 +172,7 @@ python -m recap_shorts.app
 | `RECAP_QWEN_PYTHON`, `RECAP_QWEN_TIMEOUT` | Qwen 목소리용 파이썬·제한 시간 |
 | `RECAP_WORK_ROOT` | 작업 폴더 (기본 `work/`) |
 | `RECAP_USAGE_LOG` | API 사용량 기록 파일 (기본 `work/_usage.jsonl`, 빈 값이면 끔) |
-| `RECAP_FX_NO_LLM` | 짤 고르기·박자 나누기에서 Gemini 를 부르지 않음(규칙으로만) |
+| `RECAP_FX_NO_LLM` | 짤 고르기·박자 나누기에서 AI(Gemini·OpenRouter)를 부르지 않음(규칙으로만) |
 | `COLLECT_CONTACT` | 수집기 User-Agent 에 넣을 연락처 |
 
 ### 3. 실행
@@ -190,7 +202,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install_shortcut.ps1
 
 브라우저에서 http://127.0.0.1:8020 을 엽니다. 8020 은 기본 번호일 뿐이라, 다른 프로그램이 쓰고 있으면 `--port 9000` 처럼 바꾸면 됩니다. `--work <폴더>` 로 작업 폴더를, `--host` 로 주소(기본 `127.0.0.1`)를 바꿀 수 있습니다. 이 서버가 이미 떠 있으면 바로가기는 새 서버를 띄우지 않고 그 서버에 창만 엽니다. 이때 창을 닫아도 서버는 꺼지지 않습니다.
 
-로컬 이미지 서버(`127.0.0.1:8791`)는 **없어도 됩니다**. 기본값은 Gemini 이미지이고, 로컬 이미지 서버를 골랐는데 서버가 꺼져 있으면 AI 그림 없이 글 캡처·사진만으로 영상을 만듭니다.
+로컬 이미지 서버(`127.0.0.1:8791`)는 **없어도 됩니다**. 기본값은 Gemini 키가 있으면 Gemini 이미지, 없으면 AI 그림 안 만듦이고, 로컬 이미지 서버를 골랐는데 서버가 꺼져 있으면 AI 그림 없이 글 캡처·사진만으로 영상을 만듭니다.
 
 ### 비용
 
@@ -232,6 +244,7 @@ powershell -ExecutionPolicy Bypass -File scripts\install_shortcut.ps1
 - `--since`/`--until` 은 그 구간을 "영상 1편"으로 봅니다(UTC).
 - `config/prices.json` 은 단가와 출처를 적어 둔 파일입니다. 가격은 바뀌니 결제 전에 출처 링크의 공식 가격표를 확인하세요.
 - Gemini 이미지·Gemini 목소리는 유료입니다. 로컬 이미지 서버로 만든 그림과 합성 효과음은 이 계산에서 0원입니다. Cloudflare Clef 는 하루 무료 한도(1만 뉴런)를 넘길 때만 돈이 듭니다.
+- OpenRouter 로 부른 호출(Claude 등)은 응답에 찍힌 실제 비용을 그대로 더합니다. 위 표는 Gemini 로 잰 값이라 Claude 편의 금액은 아직 재지 않았습니다.
 
 ### 4. 8단계와 확인 단계 4개
 
@@ -302,7 +315,7 @@ cd web
 npm run typecheck
 ```
 
-시험은 디시·Gemini·이미지 서버·목소리·렌더·Clef 를 가짜로 바꿔서 돌립니다(유료 API 를 부르지 않음).
+시험은 디시·Gemini·OpenRouter·이미지 서버·목소리·렌더·Clef 를 가짜로 바꿔서 돌립니다(유료 API 를 부르지 않음).
 
 ## 쓰는 사람의 책임
 
@@ -344,7 +357,7 @@ recap-shorts-automation/
 │  ├─ local_tabs.py          (gitignore) 확장 탭 — 없으면 썰쇼츠만
 │  ├─ app/                   FastAPI 서버 (server.py)
 │  ├─ collect/  script/  voice/  images/  render/  capcut/  clef/  fx/
-│  ├─ llm/                   Gemini 텍스트·비전 호출(gemini_api)과 모델 목록(gemini_models)
+│  ├─ llm/                   Gemini·OpenRouter 텍스트·비전 호출(gemini_api)과 모델 목록(gemini_models)
 │  ├─ archive.py             끝난 작업을 구글 드라이브로 (SHA-256 확인 뒤에만 로컬 삭제)
 │  ├─ errors.py              오류를 화면용 한국어로 (예외 이름·경로를 화면에 내보내지 않음)
 │  ├─ modelfiles.py          로컬 모델 파일(models/) 받기·검사
