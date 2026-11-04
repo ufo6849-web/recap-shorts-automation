@@ -66,15 +66,16 @@ verdict 는 다음 영문 값 중 하나다. 먼저 핵심 행동·대상·수�
 - "true": 보도로 주장의 핵심과 단계가 확인된다. '식약처가 표시 제도 개선 검토에 착수했다'는 주장은 그 검토 착수 보도가 있으면 true 다. 검토 단계라는 이유나 시행 보도가 없다는 이유로 false·partly·unverified 로 두지 않는다.
 - "false": 다음 둘 중 하나다. (1) 보도가 주장과 핵심이 다른 사실을 전한다. 행동·대상·수치·주체가 다르면 일부 단어가 같아도 false 다. 예: 보도는 '표시 제도 개선 검토', 주장은 '2027년 1월부터 원유 함량 50% 미만 가공유 판매 전면 금지 발표'이면 행동이 달라 false 다. 보도는 '우유는 원유 100%', 주장은 '서울우유 흰우유는 원유 40%여서 판매 금지'이면 핵심 수치가 달라 false 다. (2) 주장이 반드시 보도될 만한 구체적 공적 사건(공식 발표, 확정, 금지·시행 날짜, 체포, 사망, 처벌 등)인데 관련 보도는 있으나 그 사건을 전한 보도가 없다. 예: 관련 정책 보도는 있지만 주장한 판매 금지 발표를 전한 보도가 없으면 false 다. 단, 핵심이 같고 단계·정도·세부만 다른 경우는 아래 partly 규칙을 따른다.
 - "partly": 핵심 행동·대상·수치·주체는 같고 단계·정도·세부만 다를 때다. 예: 보도는 '표시 제도 개선 검토 착수', 주장은 '표시 제도 개선 시행 예정'이면 같은 개선 행동의 단계 차이이므로 partly 다. '표시 개선'을 '판매 금지'로 바꾼 주장은 단계 차이가 아니므로 partly 가 아니라 false 다.
-- "unverified": 관련 보도가 아예 없고, 반드시 보도될 만한 공적 사건도 아닐 때만이다. 예: 보도가 없는 개인 경험이나 작은 지역 일이다. 관련 보도가 있는데 주장한 구체적 공적 사건의 보도만 없다는 이유로 unverified 로 두지 않는다.
+- "unverified": 관련 보도가 아예 없어 사실 여부를 확인할 수 없다. 반드시 보도될 만한 공적 사건도 관련 보도가 아예 없으면 unverified 로 두고 public_event 를 true 로 표시한다. 관련 보도가 있는데 주장한 구체적 공적 사건의 보도만 없다는 이유로 unverified 로 두지 않는다.
 
 규칙
 - 보도에 없는 내용을 추측으로 채우지 않는다.
+- public_event 는 주장마다 넣는 불리언이다. 반드시 보도될 만한 구체적 공적 사건(공식 발표, 확정, 금지·시행 날짜, 체포, 기소, 사망, 처벌, 대형 사고·사건 등)을 주장하면 true 다. 개인 경험, 의견, 작은 지역 일, 일반 상식이면 false 다. 보도를 찾았는지나 verdict 와 무관하게 주장의 성격으로 정한다.
 - fact 는 verdict 가 true·partly·false 일 때 보도로 확인된 실제 내용을 한 문장으로 쓴다. false 일 때도 거짓 주장을 반복하거나 단순히 부정하지 말고 보도가 확인한 실제 내용을 적는다. unverified 이면 null 이다.
 - sources 에는 근거로 든 기사 URL 만 넣는다. 검색으로 실제 찾은 기사 URL 이어야 한다.
 - why 는 보도가 실제로 말하는 내용을 한 문장으로 적는다. 관련 보도가 아예 없으면 관련 보도를 찾지 못했다고 적고, 보도 내용을 지어내지 않는다.
 
-JSON 형식: {"results": [{"id": "C1", "verdict": "true" | "partly" | "false" | "unverified", "why": "...", "fact": "... 또는 null", "sources": ["https://..."]}], "overall_why": "한 문장"}"""
+JSON 형식: {"results": [{"id": "C1", "verdict": "true" | "partly" | "false" | "unverified", "public_event": true | false, "why": "...", "fact": "... 또는 null", "sources": ["https://..."]}], "overall_why": "한 문장"}"""
 
 _SCRIPT_HEAD = """너는 쇼츠 대본 검수 담당이다. 아래 주장은 사실 확인에서 확인되지 않았거나 사실 아님으로 판정되었다. 대본의 각 부분(번호 포함)이 그 주장을 사실처럼 말하거나 뒷받침하는지 찾아라.
 - 주장을 사실처럼 말하는 부분만 고른다. 주장을 부정하거나 "보도되지 않았다", "확인되지 않았다"처럼 의심하는 부분은 고르지 않는다.
@@ -246,6 +247,7 @@ def verify(claims: list[dict]) -> dict:
     results = []
     for c in claims:
         r = got.get(c["id"]) or {}
+        public_event = r.get("public_event") is True
         verdict = str(r.get("verdict") or "").strip().lower()
         if verdict not in VERDICTS:
             verdict = "unverified"
@@ -253,8 +255,12 @@ def verify(claims: list[dict]) -> dict:
         fact = (str(r.get("fact") or "").strip() or None) if verdict in ("true", "partly", "false") else None
         sources = _sources(r.get("sources"), cited)
         if verdict in ("true", "partly") and not sources:
-            verdict, why, fact = "unverified", "인용된 출처가 없어 확인 불가로 내렸습니다.", None
-        results.append({"id": c["id"], "verdict": verdict, "why": why, "fact": fact, "sources": sources})
+            verdict, fact = "unverified", None
+            why = "인용된 출처가 없어 확인 불가로 내렸습니다." + (f" {why}" if public_event and why else "")
+        if verdict == "unverified" and public_event:
+            why = "반드시 보도될 일인데 관련 보도를 찾지 못했습니다." + (f" {why}" if why else "")
+        results.append({"id": c["id"], "verdict": verdict, "public_event": public_event,
+                        "why": why, "fact": fact, "sources": sources})
     cost = (resp.get("usageMetadata") or {}).get("costUsd")
     return {"results": results, "overall_why": str(out.get("overall_why") or "").strip(),
             "model": VERIFY_MODEL, "search": SEARCH,
@@ -262,9 +268,9 @@ def verify(claims: list[dict]) -> dict:
 
 
 def overall_status(results: list[dict]) -> str:
-    """false 가 하나라도 있으면 stop, 모두 true 면 pass, 그 밖(확인 불가·일부·결과 없음)은 warn."""
+    """false 또는 unverified 이면서 public_event 인 결과가 하나라도 있으면 stop, 모두 true 면 pass, 그 밖은 warn."""
     vs = [r.get("verdict") for r in results]
-    if "false" in vs:
+    if "false" in vs or any(r.get("verdict") == "unverified" and r.get("public_event") is True for r in results):
         return "stop"
     if vs and all(v == "true" for v in vs):
         return "pass"
@@ -296,6 +302,7 @@ def build_record(title, source_text, cls, ver, *, error=None, forced=False) -> d
         r = got.get(c["id"]) or {}
         rec["claims"].append({"id": c["id"], "claim": c["claim"], "source_quote": c["source_quote"],
                               "verdict": r.get("verdict") or "unverified", "why": r.get("why") or "",
+                              "public_event": r.get("public_event") is True,
                               "fact": r.get("fact"), "sources": r.get("sources") or []})
     rec["status"] = status or overall_status(rec["claims"])
     if ver:
