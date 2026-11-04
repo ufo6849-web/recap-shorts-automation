@@ -1,9 +1,11 @@
 {
-  "_comment": "도메인 -> 언론사명. 확실한 것만 적음. 목록에 없으면 도메인을 그대로 씀. 하위 도메인은 접미사로 맞춤.",
+  "_comment": "도메인 -> 언론사명. 확실한 것만 적음. 목록에 없으면 앞의 www.·m.·mobile.을 뺀 도메인을 씀. 하위 도메인은 접미사로 맞춤.",
   "domains": {
     "yna.co.kr": "연합뉴스",
     "newsis.com": "뉴시스",
     "news1.kr": "뉴스1",
+    "newsworks.co.kr": "뉴스웍스",
+    "chuksannews.co.kr": "축산신문",
     "chosun.com": "조선일보",
     "biz.chosun.com": "조선비즈",
     "joongang.co.kr": "중앙일보",
