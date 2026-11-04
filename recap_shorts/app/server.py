@@ -33,6 +33,9 @@ DEFAULT_GALLERY = "baseball_new13"
 TOPICS_TTL = 600.0
 FIT_RETRY_AFTER = 60.0      # 맞춤 점수 호출이 실패하면 이 시간 동안은 다시 부르지 않는다(하루 한도·키 없음일 때 화면 조작마다 기다리지 않게)
 ARCHIVED_MSG = "구글 드라이브에 보관된 작업이라 고칠 수 없습니다"
+# 단계 → 그 단계가 부르는 조건(settings.readiness 의 need). 자료 화면은 그림 읽기(비전) 호출을 부른다.
+STEP_NEEDS = {"script": ("script",), "read": ("read",), "assets": ("read",), "voice": ("voice",)}
+WHO = {"gemini": "Gemini", "openrouter": "OpenRouter"}
 
 
 def _ok(detail: str, ok: bool = True) -> dict:
@@ -151,21 +154,15 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
         out = {}
         gem_bad = False
         try:
-            from recap_shorts import settings
-            rd = settings.readiness()
-            gkey, okey = settings.get_key("gemini_api_key"), settings.get_key("openrouter_api_key")
-            via = rd["via"]
-            used = {"gemini", "openrouter"} if via == "mixed" else ({via} if via else set())
-            gem_bad = "gemini" in used and bool(gkey) and bad_keys.get("gemini") == _fingerprint(gkey)
-            or_bad = "openrouter" in used and bool(okey) and bad_keys.get("openrouter") == _fingerprint(okey)
-            if gem_bad or or_bad:                       # 실제로 쓰일 공급자의 키가 연결 확인에서 틀렸다고 나온 것
-                who = "Gemini" if gem_bad else "OpenRouter"
-                out["gemini_key"] = _ok(f"{who} API 키가 맞지 않습니다 — 설정에서 키를 확인하세요", False)
+            rd = pipeline_ready(fake_ok=False)          # 가짜 부품 앱도 실제 설정을 본다(상태 점검)
+            gem_bad = rd["bad"] == "gemini"
+            if rd["bad"]:                               # 실제로 쓰일 공급자의 키가 연결 확인에서 틀렸다고 나온 것
+                out["gemini_key"] = _ok(rd["reason"], False)
                 out["gemini_key"]["bad"] = True
             elif not rd["ok"]:
                 out["gemini_key"] = _ok(rd["reason"], False)
             else:
-                out["gemini_key"] = _ok(HEALTH_VIA.get(via, "준비됨"))
+                out["gemini_key"] = _ok(HEALTH_VIA.get(rd["via"], "준비됨"))
         except Exception as e:  # noqa: BLE001
             out["gemini_key"] = _ok(f"설정을 읽지 못함 — {errors.screen_text(e, '파일을 읽을 수 없습니다')}", False)
         try:
@@ -399,9 +396,11 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
             elif r.status_code in (401, 403):
                 bad_keys["openrouter"] = _fingerprint(key)
                 return fail(f"키가 맞지 않습니다 (HTTP {r.status_code})", key)
-            elif r.status_code == 402:
+            elif r.status_code == 402:                  # 잔액 부족은 인증이 된 뒤의 답 — 틀린 키 표시는 지운다
+                bad_keys.pop("openrouter", None)
                 return fail("OpenRouter 잔액이 모자랍니다 (HTTP 402) — openrouter.ai 에서 확인하세요", key)
             elif r.status_code == 429:
+                bad_keys.pop("openrouter", None)
                 return fail("키는 맞지만 사용 한도에 걸렸습니다", key)
             else:
                 return fail(f"확인 실패 (HTTP {r.status_code})", key)
@@ -647,12 +646,43 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
         """가짜 부품(FakeDeps)으로 띄운 시험 앱은 키를 보지 않는다(시험용 앱은 막지 않는다)."""
         return type(deps) is not P.Deps
 
-    def pipeline_ready() -> dict:
-        """대본·그림 읽기·목소리가 모두 갈 곳이 있는가(설정 readiness). 가짜 부품 시험 앱은 통과."""
-        if fake_parts():
-            return {"ok": True, "reason": None, "via": None}
+    def pipeline_ready(job_options: dict | None = None, steps: list[str] | None = None, *, fake_ok: bool = True) -> dict:
+        """대본·그림 읽기·목소리가 갈 곳이 있고 틀린 키가 아닌가. health 와 작업 문이 같이 쓴다.
+        job_options 의 script_model·tts_engine 을 설정 대신 쓰고, steps(앞으로 돌릴 단계)에 필요한 조건만 본다(None 이면 전부).
+        fake_ok 면 가짜 부품 시험 앱은 통과한다(health 는 끈다 — 실제 설정을 본다)."""
+        if fake_ok and fake_parts():
+            return {"ok": True, "reason": None, "via": None, "bad": None}
         from recap_shorts import settings
-        return settings.readiness()
+        opts = job_options or {}
+        need = None if steps is None else {n for s in steps for n in STEP_NEEDS.get(s, ())}
+        rd = settings.readiness(script_model=opts.get("script_model") or None,
+                                tts_engine=opts.get("tts_engine") or None, need=need)
+        via = rd["via"]
+        used = {"gemini", "openrouter"} if via == "mixed" else ({via} if via else set())
+        for prov, name in (("gemini", "gemini_api_key"), ("openrouter", "openrouter_api_key")):
+            k = settings.get_key(name)
+            if prov in used and k and bad_keys.get(prov) == _fingerprint(k):
+                return {"ok": False, "reason": f"{WHO[prov]} API 키가 맞지 않습니다 — 설정에서 키를 확인하세요",
+                        "via": via, "bad": prov}
+        return {"ok": rd["ok"], "reason": rd["reason"], "via": via, "bad": None}
+
+    def steps_to_run(job: P.Job) -> list[str]:
+        """이어 하기가 돌릴 단계. 첫 대기 단계는 P.continue_job 이 확인으로 끝내므로 뺀다(이미 끝난 단계 조건으로 막지 않게)."""
+        waiting = next((s["key"] for s in job.state["steps"] if s["status"] == "waiting"), None)
+        return [s["key"] for s in job.state["steps"] if s["status"] != "done" and s["key"] != waiting]
+
+    def job_options_checked(opts: dict) -> dict:
+        """작업 옵션 중 준비 상태를 바꾸는 것(대본 모델·목소리 엔진)만 확인한다. 틀리면 400, 대본 모델은 앞뒤 공백을 뺀다."""
+        from recap_shorts import settings
+        out = dict(opts)
+        if out.get("script_model") not in (None, ""):
+            sm = out["script_model"].strip() if isinstance(out["script_model"], str) else out["script_model"]
+            if not settings.valid_model_id("script", sm):
+                raise HTTPException(400, "대본 모델 이름에 쓸 수 없는 글자가 있습니다")
+            out["script_model"] = sm
+        if out.get("tts_engine") not in (None, "") and out["tts_engine"] not in settings.VOICE_ENGINE_IDS:
+            raise HTTPException(400, "모르는 목소리 엔진입니다")
+        return out
 
     def no_key_409(message: str) -> HTTPException:
         return HTTPException(409, {"code": "no_key", "message": message})
@@ -674,7 +704,11 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
     @app.post("/api/jobs")
     def create_job(body: dict = Body(...)):
         from recap_shorts.collect import blind, dcinside
-        rd = pipeline_ready()
+        opts = body.get("options") or {}
+        if not isinstance(opts, dict):
+            raise HTTPException(400, "options 는 객체여야 합니다")
+        opts = job_options_checked(opts)
+        rd = pipeline_ready(opts)                  # 요청이 고른 대본 모델·목소리 엔진으로 준비 상태를 본다
         if not rd["ok"]:
             raise no_key_409(rd["reason"])
         url, site, topic = body.get("url"), "dcinside", ""
@@ -700,9 +734,6 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
                     raise HTTPException(400, str(e))
         else:
             raise HTTPException(400, "url 또는 gallery+no 가 필요합니다")
-        opts = body.get("options") or {}
-        if not isinstance(opts, dict):
-            raise HTTPException(400, "options 는 객체여야 합니다")
         with create_lock:
             if body.get("allow_duplicate") is not True:
                 idx = made_mod.get_index(store.root)
@@ -730,9 +761,8 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
         job = job_or_404(jid)
         if job.archived:
             raise HTTPException(409, ARCHIVED_MSG)
-        nxt = next((s["key"] for s in job.state["steps"] if s["status"] != "done"), "")
-        rd = pipeline_ready()
-        if nxt in P.GEMINI_STEPS and not rd["ok"]:     # 이어 할 단계가 대본·그림 읽기·목소리를 부르면 준비부터
+        rd = pipeline_ready(job.options, steps_to_run(job))
+        if not rd["ok"]:                               # 앞으로 돌릴 단계가 대본·그림 읽기·목소리를 부르면 준비부터
             raise no_key_409(rd["reason"])
         try:
             P.continue_job(runner, job)
@@ -748,8 +778,8 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
         key = body.get("from")
         if key not in ("assets", "scenes", "render"):
             raise HTTPException(400, "from 은 assets·scenes·render 중 하나")
-        rd = pipeline_ready()
-        if key in P.GEMINI_STEPS and not rd["ok"]:     # AI 그림·청크 찾기·목소리를 다시 부르는 단계
+        rd = pipeline_ready(job.options, P.STEP_KEYS[P.STEP_KEYS.index(key):])   # key 부터 끝까지가 다시 돈다
+        if not rd["ok"]:                               # AI 그림·청크 찾기·목소리를 다시 부르는 단계는 준비부터
             raise no_key_409(rd["reason"])
         with job.lock:
             if any(job.step(k)["status"] != "done" for k in P.STEP_KEYS[:P.STEP_KEYS.index(key)]):
@@ -1112,10 +1142,10 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
         entries = json.loads(ap.read_text(encoding="utf-8")) if ap.is_file() else []
         if next((x for x in entries if x["file"] == f and x["kind"] == "ai"), None) is None:
             raise HTTPException(404, "다시 만들 수 있는 AI 이미지가 아닙니다")
+        if provider.engine() == "gemini":
+            require_gemini_key("AI 그림 다시 만들기")   # 503(엔진 가용성)에 가려지지 않게 먼저 본다
         if not deps.image_available():
             raise HTTPException(503, "AI 그림을 만들 수 없습니다 — 설정에서 엔진을 확인하세요")
-        if provider.engine() != "local":
-            require_gemini_key("AI 그림 다시 만들기")   # 로컬 그림 서버만 쓰면 Gemini 키가 없어도 된다
         new_hint = (body.get("prompt") or "").strip()
 
         def task(j: P.Job):

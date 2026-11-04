@@ -73,9 +73,10 @@ def route(model: str, has_gemini: bool, has_openrouter: bool) -> tuple[str, str]
 
 
 def _post(model: str, body: dict, timeout: float = 300.0, sleep=time.sleep) -> dict:
-    provider, name = route(model, bool(_key_or_empty()), bool(_openrouter_key()))
+    okey = _openrouter_key()                 # 한 번만 읽는다: 다시 읽는 사이 키가 지워지면 빈 키로 나갈 수 있다
+    provider, name = route(model, bool(_key_or_empty()), bool(okey))
     if provider == "openrouter":
-        return _post_openrouter(name, body, timeout, sleep)
+        return _post_openrouter(name, body, timeout, sleep, key=okey)
     url = f"{BASE}/{model}:generateContent"
     last = ""
     for attempt in range(RETRIES + 1):
@@ -158,18 +159,21 @@ def _or_request(or_model: str, body: dict) -> tuple[dict, dict]:
     return req, seen
 
 
-def _gemini_shape(data: dict) -> dict:
-    """OpenRouter 답 → Gemini 답 모양. 거절(content_filter·refusal)은 promptFeedback.blockReason 으로 옮긴다."""
+def _gemini_shape(data: dict, or_model: str) -> dict:
+    """OpenRouter 답 → Gemini 답 모양. 거절·빈 내용은 OpenRouter 오류로 낸다(Gemini 문구가 붙지 않게).
+    거절 문구의 blockReason=SAFETY 는 images/sensitive._is_block 이 알아보는 표식이다."""
     ch = (data.get("choices") or [{}])[0] or {}
     msg = ch.get("message") or {}
     finish = ch.get("finish_reason")
     if finish == "content_filter" or msg.get("refusal"):
-        return {"candidates": [], "promptFeedback": {"blockReason": "SAFETY"}}
+        raise GeminiApiError(f"OpenRouter 응답이 거절됨({or_model}, blockReason=SAFETY)", provider="openrouter")
     content = msg.get("content")
     if isinstance(content, list):
         text = "".join(str(p.get("text") or "") for p in content if isinstance(p, dict) and p.get("type") == "text")
     else:
         text = content if isinstance(content, str) else ""
+    if not text.strip():
+        raise GeminiApiError(f"OpenRouter 응답이 비어 있음(finishReason={finish})", provider="openrouter")
     return {"candidates": [{"content": {"parts": [{"text": text}]}, "finishReason": finish}]}
 
 
@@ -196,11 +200,13 @@ def _json_dict(r) -> dict:
 def _error_text(r, data: dict, key: str) -> str:
     err = data.get("error")
     msg = (err.get("message") if isinstance(err, dict) else err) or getattr(r, "text", "") or ""
-    return str(msg)[:300].replace(key, "<key>")                  # 키 값은 오류 문구에 넣지 않는다
+    s = str(msg)
+    if key:                                  # 자르기 전에 가린다 — 키가 300자 경계에 걸리면 앞부분이 남는다(빈 키는 건드리지 않음)
+        s = s.replace(key, "<key>")
+    return s[:300]
 
 
-def _post_openrouter(or_model: str, body: dict, timeout: float = 300.0, sleep=time.sleep) -> dict:
-    key = _openrouter_key()
+def _post_openrouter(or_model: str, body: dict, timeout: float = 300.0, sleep=time.sleep, *, key: str) -> dict:
     req, seen = _or_request(or_model, body)
     tries, stripped = 0, False
     while True:
@@ -217,7 +223,7 @@ def _post_openrouter(or_model: str, body: dict, timeout: float = 300.0, sleep=ti
         data = _json_dict(r)
         if r.status_code == 200 and data.get("choices"):
             _log_openrouter(or_model, data, seen)                # 성공한 답 한 번에 한 번만 기록
-            return _gemini_shape(data)
+            return _gemini_shape(data, or_model)
         msg = _error_text(r, data, key)
         if r.status_code == 400 and "response_format" in req and not stripped and \
                 ("response_format" in msg.lower() or "json" in msg.lower()):

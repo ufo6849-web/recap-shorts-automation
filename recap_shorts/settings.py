@@ -551,30 +551,36 @@ def llm_ready() -> bool:
     return bool(get_key("gemini_api_key") or get_key("openrouter_api_key"))
 
 
-def readiness() -> dict:
+def readiness(script_model: str | None = None, tts_engine: str | None = None, need=None) -> dict:
     """영상 만들기 준비 상태: 대본 모델과 그림 읽기가 갈 곳이 있고, 목소리가 준비돼 있는가.
+    script_model·tts_engine 을 주면 작업 옵션 값으로 보고, 없으면 설정 값으로 본다.
+    need 는 확인할 조건("script"·"read"·"voice")의 모음이다(None 이면 셋 다). 이미 끝난 단계의 조건은 넣지 않는다.
     reason 은 처음 걸린 조건의 한국어 문장, via 는 화면 표시용(gemini | openrouter | mixed | None)."""
     from recap_shorts import modelfiles
     from recap_shorts.llm import gemini_api as G
+    need = {"script", "read", "voice"} if need is None else set(need)
     no_key = "Gemini 또는 OpenRouter API 키가 필요합니다"
     has_g, has_o = bool(get_key("gemini_api_key")), bool(get_key("openrouter_api_key"))
-    script = model("script")
     reason, via = None, set()
-    try:
-        via.add(G.route(script, has_g, has_o)[0])
-    except G.GeminiApiError:
-        reason = f"대본 모델({script})은 OpenRouter 키가 필요합니다" if "/" in script else no_key
-    try:
-        via.add(G.route(G.VISION_MODEL, has_g, has_o)[0])
-    except G.GeminiApiError:
-        reason = reason or no_key
-    voice = voice_engine()
-    if voice == "gemini" and has_g:
-        via.add("gemini")
-    if reason is None and voice == "gemini" and not has_g:
-        reason = "목소리가 Gemini 인데 Gemini 키가 없습니다 — 설정에서 로컬 목소리를 고르세요"
-    if reason is None and voice == "supertonic" and not modelfiles.ok("supertonic"):   # 대본 비용을 쓴 뒤 목소리에서 멈추지 않게
-        reason = "로컬 목소리(Supertonic) 모델이 없습니다 — 설정 → 모델 파일에서 먼저 받으세요"
+    if "script" in need:
+        script = script_model or model("script")
+        try:
+            via.add(G.route(script, has_g, has_o)[0])
+        except G.GeminiApiError:
+            reason = f"대본 모델({script})은 OpenRouter 키가 필요합니다" if "/" in script else no_key
+    if "read" in need:
+        try:
+            via.add(G.route(G.VISION_MODEL, has_g, has_o)[0])
+        except G.GeminiApiError:
+            reason = reason or no_key
+    voice = tts_engine or voice_engine()
+    if "voice" in need:
+        if voice == "gemini" and has_g:
+            via.add("gemini")
+        if reason is None and voice == "gemini" and not has_g:
+            reason = "목소리가 Gemini 인데 Gemini 키가 없습니다 — 설정에서 로컬 목소리를 고르세요"
+        if reason is None and voice == "supertonic" and not modelfiles.ok("supertonic"):   # 대본 비용을 쓴 뒤 목소리에서 멈추지 않게
+            reason = "로컬 목소리(Supertonic) 모델이 없습니다 — 설정 → 모델 파일에서 먼저 받으세요"
     shown = None if not via else ("mixed" if len(via) > 1 else next(iter(via)))
     return {"ok": reason is None, "reason": reason, "via": shown}
 
