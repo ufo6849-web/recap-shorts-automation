@@ -97,9 +97,24 @@ def build_prompt(topic: dict) -> str:
     parts += ["", "[원문 source_text - evidence 는 반드시 여기서 그대로 복사]", "<<<",
               (topic.get("source_text") or "").strip(), ">>>"]
     facts = topic.get("facts") or []
+    false_claims = topic.get("false_claims") or []
+    unverified = topic.get("unverified_claims") or []
     if facts:
         parts += ["", "[확인된 사실 facts - evidence 는 이 목록의 evidence 또는 위 원문에서]"]
         for f in facts:
             parts.append(f"- ({f.get('id')}) {f.get('text')} / evidence: {f.get('evidence')}")
+    if false_claims:
+        parts += ["", "[사실 아님 주장 false_claims - 뉴스로 확인해 사실이 아니다. 사실처럼 말하지 않는다]"]
+        for c in false_claims:
+            parts.append(f"- ({c.get('id')}) {c.get('claim')}")
+    if unverified:
+        parts += ["", "[확인되지 않은 주장 unverified_claims - 보도로 확인되지 않았다. 이 주장의 수치·내용은 쓰지 않는다]"]
+        for c in unverified:
+            parts.append(f"- ({c.get('id')}) {c.get('claim')}")
+    if facts or false_claims or unverified:
+        parts += ["", "[사실 확인 규칙]",
+                  "- 원문과 확인된 사실(facts)이 다르면 facts를 따른다.",
+                  "- 사실 아님 주장(false_claims)은 사실처럼 말하지 않는다.",
+                  "- 확인되지 않은 주장(unverified_claims)의 수치·주장은 쓰지 않는다."]
     parts += ["", RULES, "[출력 형식] 아래 JSON 객체 하나만 출력한다.", SCHEMA]
     return "\n".join(parts)

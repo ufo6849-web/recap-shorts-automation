@@ -49,16 +49,18 @@ def test_news_card_renders(tmp_path):
     from PIL import Image
     p = draw_news_card("가" * 120, ITEM.outlet, ITEM.pub_date, tmp_path / "c" / "card.png")
     with Image.open(p) as im:
-        assert im.size == (1080, 600)
+        assert im.size == (1080, 810)
     p2 = draw_news_card(ITEM.title, "연합뉴스", ITEM.pub_date, tmp_path / "c2.png")
     assert p2.stat().st_size > 5000
 
 
 def test_news_card_font_missing(tmp_path, monkeypatch):
-    from recap_shorts.collect import news_card
-    monkeypatch.setattr(news_card, "_FONT_DIRS", [tmp_path])
+    from recap_shorts.render import layout
+    monkeypatch.setattr(layout, "FONT_CANDIDATES", [str(tmp_path / "none.otf")])
+    layout.load_font.cache_clear()
     with pytest.raises(FontNotFound):
         draw_news_card("제목", "언론사", "2026.10.05", tmp_path / "x.png")
+    layout.load_font.cache_clear()
 
 
 def test_cli_keyword_without_news_json_skips_cards_but_continues(tmp_path):
