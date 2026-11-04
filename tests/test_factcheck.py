@@ -218,6 +218,33 @@ def test_verify_asks_with_google_search_tool_model_and_120s(monkeypatch):
     assert c["body"]["generationConfig"] == {"responseMimeType": "application/json"}
 
 
+def test_verify_starts_user_message_with_all_queries_in_one_call(monkeypatch):
+    use_or_key(monkeypatch)
+    calls = fake_post(monkeypatch, verdict_answer([], chunks=[]))
+    claims = [VCLAIM, {"id": "C2", **CLAIM2}]
+    F.verify(claims)
+    (call,) = calls
+    (message,) = call["body"]["contents"]
+    assert message["role"] == "user"
+    prompt = message["parts"][0]["text"]
+    assert prompt.splitlines()[0] == f"검색어: {VCLAIM['query']} / {CLAIM2['query']}"
+    assert prompt.index("검색어: ") < prompt.index("verdict 는") < prompt.index("주장:\n")
+    for c in claims:
+        assert f"- {c['id']}: {c['claim']}" in prompt
+
+
+@pytest.mark.parametrize("query_fields", [{"query": ""}, {"query": "   "}, {"query": None}, {}])
+def test_verify_search_line_falls_back_to_claim_when_query_empty(monkeypatch, query_fields):
+    use_or_key(monkeypatch)
+    calls = fake_post(monkeypatch, verdict_answer([], chunks=[]))
+    fallback = {k: v for k, v in VCLAIM.items() if k != "query"}
+    fallback.update(query_fields)
+    F.verify([fallback, {"id": "C2", **CLAIM2}])
+    (call,) = calls
+    prompt = call["body"]["contents"][0]["parts"][0]["text"]
+    assert prompt.splitlines()[0] == f"검색어: {VCLAIM['claim']} / {CLAIM2['query']}"
+
+
 def test_verify_keeps_only_cited_urls_and_takes_title_from_metadata(monkeypatch):
     use_or_key(monkeypatch)
     chunks = [web(URL_A, "식약처, 가공유 표시 개선 검토"), web("https://news.example.org/a", "다른 기사")]

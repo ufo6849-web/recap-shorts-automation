@@ -63,10 +63,10 @@ _RULE_FORCE = "kind 가 general 이어도 사실 주장이 하나라도 있으�
 _VERIFY_HEAD = """너는 한국어 뉴스 사실 확인 담당이다. 아래 주장을 웹 검색으로 찾은 보도와 대조하라. 오늘은 <<오늘>>이다.
 
 verdict 는 다음 영문 값 중 하나다.
-- "true": 보도로 주장이 확인된다.
-- "partly": 주장의 일부만 보도로 확인되거나 맞는 부분과 틀린 부분이 섞였다. fact 에 보도로 확인된 내용을 바로잡아 적는다.
+- "true": 보도로 주장이 확인된다. 주장과 보도의 단계가 같으면 true 다. 예를 들어 '검토에 착수했다'는 주장은 검토 착수 보도로 확인되면 true 다.
+- "partly": 주장의 일부만 보도로 확인되거나 맞는 부분과 틀린 부분이 섞였다. 검토·가능성·발표 예정만 보도됐는데 주장이 더 앞선 단계인 확정·시행을 말하면 partly 다. fact 에 보도로 확인된 내용을 바로잡아 적는다.
 - "false": 보도가 주장과 반대되는 사실을 분명히 보도한다. 근거가 애매하면 false 가 아니라 unverified 다.
-- "unverified": 보도가 주장을 직접 다루지 않거나, 검토·가능성·발표 예정 같은 단계만 보도되어 주장 내용이 확인되지 않는다.
+- "unverified": 보도가 주장을 직접 다루지 않거나, 주장 내용의 사실 여부를 판단할 보도 근거가 부족하다. 검토·가능성·발표 예정 단계라는 이유만으로 unverified 로 두지 말고, 주장과 보도의 단계를 비교해 위의 true·partly 규칙을 적용한다.
 
 규칙
 - 보도에 없는 내용을 추측으로 채우지 않는다.
@@ -225,10 +225,12 @@ def _sources(raw, cited: dict) -> list[dict]:
 
 
 def _verify_prompt(claims: list[dict]) -> str:
+    # 웹 플러그인이 검색어를 만들 때 핵심어를 먼저 보도록 사용자 메시지 첫 줄에 둔다.
+    queries = " / ".join((c.get("query") or "").strip() or c["claim"] for c in claims)
     listing = "\n".join(f"- {c['id']}: {c['claim']}" + (f" (검색 힌트: {c['query']})" if c.get("query") else "")
                         for c in claims)
     head = _VERIFY_HEAD.replace("<<오늘>>", date.today().isoformat())
-    return "\n\n".join([head, "주장:\n" + listing])
+    return "\n\n".join(["검색어: " + queries, head, "주장:\n" + listing])
 
 
 def verify(claims: list[dict]) -> dict:
