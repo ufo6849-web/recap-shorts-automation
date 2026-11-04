@@ -57,7 +57,9 @@ def test_ad_only_claim_keeps_gate_but_never_becomes_content(
     assert F.load_record(job.dir) == rec and rec["status"] == status
     assert P.factcheck_status(job)["gate"] == gate
     saved_topic = json.loads((job.dir / "topic.json").read_text(encoding="utf-8"))
-    assert saved_topic["facts"] == [] and F.description_notice(rec)[1] == []
+    assert saved_topic["facts"] == []
+    note = F.PASS_NO_SOURCES_NOTE if status == "pass" else F.CAUTION_NOTE
+    assert F.description_notice(rec) == (note, [])
     assert P._news_cards(P.Ctx(job, "assets", deps), saved_topic) == []
     # 낡은 topic에 광고 사실이 남아 있어도 카드 입구가 직접 거른다.
     saved_topic["facts"] = [{"id": "F1", "claim_id": "C1", "source": FC_URL, "text": quote}]

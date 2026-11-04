@@ -670,7 +670,7 @@ def finish_and_read_description(tmp_path, deps):
 @pytest.mark.parametrize("label, deps, note, news", [
     ("skipped", deps_for("skipped"), F.DEFAULT_NOTE, False),
     ("pass", deps_for("pass"), F.PASS_NOTE, True),
-    ("ad_pass", ad_pass_deps(), F.PASS_NOTE, False),
+    ("ad_pass", ad_pass_deps(), F.PASS_NO_SOURCES_NOTE, False),
     ("warn", mixed_deps(), F.CAUTION_NOTE, True),
 ])
 def test_description_notice_follows_status(tmp_path, label, deps, note, news):
