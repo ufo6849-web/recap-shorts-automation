@@ -156,6 +156,8 @@ def test_read_records_status_topic_additions_and_policy(tmp_path, status):
     rec = F.load_record(job.dir)
     assert rec["status"] == status and rec["input_hash"] == fc_hash(job)
     topic = read_topic(job.dir)
+    assert topic["topic_auto"] == topic["topic"]
+    assert topic["topic"] not in P.fc_input(topic)[1]
     sub = {s["label"]: s for s in job.step("read")["sub"]}["사실 확인"]
     assert sub["status"] == ("error" if status in ("stop", "failed") else "done")
     if status == "skipped":
@@ -506,6 +508,22 @@ def test_script_check_not_called_without_false_or_unverified(tmp_path):
 
 
 # ---------------------------------------------------------------- 뉴스 카드·문장 근거
+@pytest.mark.parametrize("url,suffix,outlet", [
+    ("https://www.mt.co.kr/a", " - 머니투데이", "머니투데이"),
+    ("https://starnewskorea.com/a", " | 스타뉴스", "스타뉴스"),
+    ("https://unknown.example.com/a", " :: 공감언론 뉴시스 ::", "공감언론 뉴시스"),
+])
+def test_news_cards_use_normalized_source_title_and_outlet(tmp_path, url, suffix, outlet):
+    deps = deps_for("pass")
+    title = "표시 제도 개선 검토"
+    sources = F._sources([url], {url: title + suffix})
+    deps.fc_verdicts = {"C1": {"sources": sources}}
+    store, runner, job = make(tmp_path, deps, {"auto_steps": ["read", "script"]})
+    go(runner, job)
+    assert [(card["title"], card["outlet"]) for card in deps.news_cards] == [(title, outlet)]
+    assert F.description_notice(F.load_record(job.dir)) == (F.PASS_NOTE, [f"{outlet} · {title} · {url}"])
+
+
 def test_news_cards_one_per_source_up_to_two(tmp_path):
     deps = three_sources_deps()
     other_fact = "분석된 176개 제품 가운데 27개가 원유 0%였다"

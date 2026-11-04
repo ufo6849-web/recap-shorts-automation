@@ -36,7 +36,13 @@ def test_outlet_mapping_uses_normalized_host(prefix):
     assert N.outlet_for(f"https://{prefix.upper()}EXAMPLE.COM:8443/a", outlets) == "가짜일보"
 
 
-@pytest.mark.parametrize("domain, outlet", [("newsworks.co.kr", "뉴스웍스"), ("chuksannews.co.kr", "축산신문")])
+@pytest.mark.parametrize("domain, outlet", [
+    ("newsworks.co.kr", "뉴스웍스"), ("chuksannews.co.kr", "축산신문"),
+    ("mt.co.kr", "머니투데이"), ("starnewskorea.com", "스타뉴스"), ("wikitree.co.kr", "위키트리"),
+    ("insight.co.kr", "인사이트"), ("mydaily.co.kr", "마이데일리"), ("nocutnews.co.kr", "노컷뉴스"),
+    ("hankookilbo.com", "한국일보"), ("kmib.co.kr", "국민일보"), ("segye.com", "세계일보"),
+    ("seoul.co.kr", "서울신문"), ("munhwa.com", "문화일보"),
+])
 @pytest.mark.parametrize("prefix", ["", "www.", "m.", "mobile."])
 def test_added_outlets_resolve_to_names(domain, outlet, prefix):
     assert N.outlet_for(f"https://{prefix}{domain}/a") == outlet
@@ -75,6 +81,44 @@ def test_items_from_json(tmp_path):
                  encoding="utf-8")
     it = N.items_from_json(f)[0]
     assert it.outlet == "가짜일보" and it.pub_date.year == 2026 and it.originallink == "https://x.example/a"
+
+
+@pytest.mark.parametrize("suffix,name", [
+    (" - 머니투데이", "머니투데이"), (" | 스타뉴스", "스타뉴스"),
+    (" :: 공감언론 뉴시스 ::", "공감언론 뉴시스"),
+])
+@pytest.mark.parametrize("mapping", ["unknown", "matching", "different"])
+def test_news_title_suffix_forms(tmp_path, suffix, name, mapping):
+    url = "https://news.example.com/article"
+    title = "기사 제목 - 중간 내용 | 앞 구분자"
+    outlets = {} if mapping == "unknown" else {"example.com": name if mapping == "matching" else "다른언론"}
+    expected = (title + suffix, "다른언론") if mapping == "different" else (title, name)
+    assert N.title_and_outlet(title + suffix, url, outlets) == expected
+    path = tmp_path / "news.json"
+    path.write_text(json.dumps([{"title": title + suffix, "url": url}]), encoding="utf-8")
+    item = N.items_from_json(path, outlets)[0]
+    assert (item.title, item.outlet) == expected
+
+
+@pytest.mark.parametrize("suffix", ["", " - 가", " | " + "가" * 21, " :: " + "가" * 21 + " ::"])
+def test_news_title_without_valid_suffix_keeps_domain(suffix):
+    title = "기사 제목" + suffix
+    assert N.title_and_outlet(title, "https://m.unknown.example.com/a", {}) == (title, "unknown.example.com")
+
+
+@pytest.mark.parametrize("name", ["가나", "가" * 20])
+def test_news_title_suffix_name_length_bounds(name):
+    assert N.title_and_outlet(f"기사 제목 | {name}", "https://unknown.example.com", {}) == ("기사 제목", name)
+
+
+def test_news_title_registered_name_mismatch_and_explicit_outlet(tmp_path):
+    assert N.title_and_outlet("기사 :: 공감언론 뉴시스 ::", "https://newsis.com/a") == (
+        "기사 :: 공감언론 뉴시스 ::", "뉴시스")
+    path = tmp_path / "news.json"
+    path.write_text(json.dumps([{"title": "기사 | 스타뉴스", "url": "https://unknown.example.com/a",
+                                 "outlet": "직접 지정한 언론사"}]), encoding="utf-8")
+    item = N.items_from_json(path, {})[0]
+    assert (item.title, item.outlet) == ("기사 | 스타뉴스", "직접 지정한 언론사")
 
 
 def test_news_card_renders(tmp_path):

@@ -37,14 +37,26 @@ def load_outlets(path: Path | str = OUTLETS_PATH) -> dict:
     return json.loads(p.read_text(encoding="utf-8")).get("domains", {})
 
 
-def outlet_for(url: str, outlets: dict | None = None) -> str:
+def outlet_for(url: str, outlets: dict | None = None, *, fallback: str = "") -> str:
     outlets = load_outlets() if outlets is None else outlets
     host = urlparse(url).netloc.lower().split(":")[0]
     host = re.sub(r"^(?:(?:www|m|mobile)\.)+", "", host)
     for dom in sorted(outlets, key=len, reverse=True):
         if host == dom or host.endswith("." + dom):
             return outlets[dom]
-    return host
+    return fallback or host
+
+
+def title_and_outlet(title: str, url: str, outlets: dict | None = None, *, outlet: str = "") -> tuple[str, str]:
+    """마지막 언론사 접미사만 분리한다. 등록 이름 또는 명시한 이름과 다르면 제목을 보존한다."""
+    suffix = re.fullmatch(r"(.+)\s+(?:[-|]\s+([^|:\r\n]+)|::\s*([^|:\r\n]+?)\s*::)\s*", title)
+    name = (suffix[2] or suffix[3]).strip() if suffix else ""
+    if not 2 <= len(name) <= 20:
+        name = ""
+    resolved = outlet or outlet_for(url, outlets, fallback=name)
+    if name and name == resolved:
+        title = suffix[1].rstrip()
+    return title, resolved
 
 
 def items_from_json(path: Path | str, outlets: dict | None = None) -> list[NewsItem]:
@@ -56,8 +68,9 @@ def items_from_json(path: Path | str, outlets: dict | None = None) -> list[NewsI
         if d.tzinfo is None:
             d = d.replace(tzinfo=timezone.utc)
         url = r.get("url", "")
-        out.append(NewsItem(title=r["title"], description=r.get("description", ""), originallink=url, link=url,
-                            pub_date=d, outlet=r.get("outlet") or outlet_for(url, outlets)))
+        title, outlet = title_and_outlet(r["title"], url, outlets, outlet=r.get("outlet") or "")
+        out.append(NewsItem(title=title, description=r.get("description", ""), originallink=url, link=url,
+                            pub_date=d, outlet=outlet))
     return out
 
 

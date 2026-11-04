@@ -632,6 +632,7 @@ def step_read(c: Ctx) -> None:
              "source_kind": "community", "source_url": src["url"],
              "tone_end": "웃기면서도 씁쓸한 감탄이나 물음 한 줄",
              "source_text": "\n".join(parts), "attachments": atts, "fc_exclude": fc_exclude}
+    topic["topic_auto"] = topic["topic"]
     c.write_json("topic.json", topic)
     c.job.artifact("topic", "topic.json")
     c.progress(0.95, "사실 확인 중 (정보성 글이면 뉴스와 대조)")
@@ -641,7 +642,7 @@ def step_read(c: Ctx) -> None:
 
 # ------------------------------------------------------------------ 사실 확인(정보성 글)
 def fc_input(topic: dict) -> tuple[str, str]:
-    """분류·판정용 원문 제목과 기록된 머리줄·댓글을 제외한 본문. 대본용 원본은 보존한다."""
+    """원문과 수동·수정 주제를 판정한다. 기록과 같은 자동 주제·머리줄·댓글만 제외한다."""
     text = topic.get("source_text") or ""
     exclusions = topic.get("fc_exclude")
     if isinstance(exclusions, list):
@@ -650,7 +651,13 @@ def fc_input(topic: dict) -> tuple[str, str]:
             if isinstance(block, str) and block and text.count(block) == 1:
                 text = text.replace(block, "", 1)
     title = re.search(r"^제목:[ \t]*(.*)$", text, re.M)
-    return (title.group(1).strip() if title else ""), text
+    title_text = title.group(1).strip() if title else ""
+    topic_text = topic.get("topic") or ""
+    if topic_text and topic_text != topic.get("topic_auto"):
+        text = f"주제: {topic_text}\n{text}"
+        if title is None:
+            title_text = topic_text
+    return title_text, text
 
 
 _FC_NOTE = {"skipped": "일반 글이라 건너뜀", "pass": "보도로 확인됨",
