@@ -25,6 +25,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from recap_shorts import archive, errors
+from recap_shorts import factcheck as fc
 from recap_shorts import pipeline as P
 from recap_shorts.collect import made as made_mod
 
@@ -140,9 +141,17 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
                 st["offline"] = not (job.dir / "state.json").is_file()
             except OSError:
                 st["offline"] = True
+        st["factcheck_policy"] = st.get("factcheck_policy")
+        st["factcheck"] = P.factcheck_view(job)
         if brief:
             st["log"] = st["log"][-5:]
         return st
+
+    def factcheck_gate_or_409(job: P.Job) -> None:
+        """사실 확인이 통과하지 않았으면(막힘·낡음·기록 없음, 주의 확인 전) 다시 하기·렌더·넘기기를 막는다. 기능 이전 작업은 통과."""
+        st = P.factcheck_status(job)
+        if st["gate"] != "clear":
+            raise HTTPException(409, st["gate_reason"])
 
     # ---------------------------------------------------------------- 상태 점검
     # 'gemini_key' 항목은 화면 호환 때문에 이름을 그대로 두고, 뜻은 'AI 키 준비'(설정 readiness)다.
@@ -766,7 +775,7 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
             raise no_key_409(rd["reason"])
         try:
             P.continue_job(runner, job)
-        except P.Busy as e:
+        except (P.Busy, P.FactcheckBlocked) as e:
             raise HTTPException(409, str(e))
         return view(job)
 
@@ -778,6 +787,7 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
         key = body.get("from")
         if key not in ("assets", "scenes", "render"):
             raise HTTPException(400, "from 은 assets·scenes·render 중 하나")
+        factcheck_gate_or_409(job)
         rd = pipeline_ready(job.options, P.STEP_KEYS[P.STEP_KEYS.index(key):])   # key 부터 끝까지가 다시 돈다
         if not rd["ok"]:                               # AI 그림·청크 찾기·목소리를 다시 부르는 단계는 준비부터
             raise no_key_409(rd["reason"])
@@ -788,6 +798,36 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
             job.log(f"'{dict(P.STEPS)[key]}' 단계부터 다시")
             job.save()
         runner.submit(job, detail=f"{dict(P.STEPS)[key]}부터 다시")
+        return view(job)
+
+    @app.post("/api/jobs/{jid}/factcheck", dependencies=[Depends(local_only)])
+    def factcheck_recheck(jid: str, body: dict = Body(default={})):
+        """사실 확인을 다시 한다(force=true 면 일반 글도 주장을 뽑아 확인). 작업 중이거나 읽기가 끝나지 않았으면 409."""
+        job = job_or_404(jid)
+        idle_or_409(job)
+        try:
+            P.recheck_factcheck(runner, job, force=body.get("force") is True)
+        except P.Busy as e:
+            raise HTTPException(409, str(e))
+        return view(job)
+
+    @app.post("/api/jobs/{jid}/factcheck/override", dependencies=[Depends(local_only)])
+    def factcheck_override(jid: str, body: dict = Body(...)):
+        """사실 아님·확인 실패 판정을 사람이 직접 확인했다고 넘긴다(메모 1~500자). 글이 바뀌었으면 안 된다."""
+        job = job_or_404(jid)
+        idle_or_409(job)
+        note = body.get("note")
+        note = note.strip() if isinstance(note, str) else ""
+        if not 1 <= len(note) <= 500:
+            raise HTTPException(400, "메모는 1~500자로 적어 주세요")
+        with job.lock:
+            st = P.factcheck_status(job)
+            rec = st["record"]
+            if rec is None or rec.get("status") not in ("stop", "failed") or st["stale"]:
+                raise HTTPException(400, "사실 아님·확인 실패 판정이고 글이 바뀌지 않았을 때만 직접 확인으로 넘길 수 있습니다")
+            rec["override"] = {"at": P.now(), "note": note, "input_hash": rec["input_hash"]}
+            fc.save_record(job.dir, rec)
+            job.log("사실 확인 판정을 직접 확인으로 넘김")
         return view(job)
 
     @app.post("/api/jobs/{jid}/archive")
@@ -1283,6 +1323,7 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
     def render_job(jid: str):
         job = job_or_404(jid)
         idle_or_409(job)
+        factcheck_gate_or_409(job)
         with job.lock:
             sc = job.step("scenes")
             if sc["status"] not in ("waiting", "done"):
@@ -1319,6 +1360,7 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
         job = job_or_404(jid)
         if job.state["status"] == "running":
             raise HTTPException(409, "지금 작업 중입니다 — 끝난 뒤에 다시 시도하세요")
+        factcheck_gate_or_409(job)
         if job.step("scenes")["status"] not in ("done", "waiting"):
             raise HTTPException(409, "장면 배치까지 끝난 뒤에 캡컷으로 넘길 수 있습니다")
         if jid in capcut_busy:

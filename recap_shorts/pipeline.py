@@ -6,6 +6,7 @@ work/<job_id>/state.json 을 계속 갱신한다 (형식·단계: docs/03_v2_app
 - 재개: 이미 done 인 단계는 건너뛰고, error 단계는 continue 로 그 단계부터 다시 한다.
 - 바깥 세계(디시, Gemini, 이미지 서버, 목소리, 렌더, Clef)는 모두 Deps 를 거친다 — 시험은 Deps 를 가짜로 바꿔 끼운다.
 - 닉네임·IP 는 저장하지 않는다(collect 모듈이 이미 지킴). 화면에 출처 줄·글 제목 카드·배경음악을 넣지 않는다.
+  뉴스 카드는 사실 확인에서 찾은 기사만 쓴다(설계 docs/PLAN_2026-11-04_factcheck.md 11.4).
 """
 from __future__ import annotations
 
@@ -23,6 +24,7 @@ from datetime import datetime
 from pathlib import Path
 
 from recap_shorts import errors
+from recap_shorts import factcheck as fc
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK_ROOT = Path(os.environ.get("RECAP_WORK_ROOT", ROOT / "work"))
@@ -219,6 +221,20 @@ class Deps:
         from recap_shorts.collect.topicfit import gemini_llm
         return gemini_llm(prompt, model)
 
+    # 사실 확인(정보성 글) — 분류·판정·대본 검수는 factcheck 모듈이 Gemini·OpenRouter 를 부른다
+    def factcheck_classify(self, title: str, text: str, force: bool = False) -> dict:
+        return fc.classify(title, text, force=force)
+
+    def factcheck_verify(self, claims: list[dict]) -> dict:
+        return fc.verify(claims)
+
+    def factcheck_script_check(self, script: dict, record: dict) -> list[dict]:
+        return fc.script_check(script, record)
+
+    def draw_news_card(self, title: str, outlet: str, date: str | None, out: Path) -> Path:
+        from recap_shorts.collect import news_card     # 카드 그리기 함수는 따로 들어온다(없으면 이 카드만 건너뜀)
+        return news_card.draw_card(title, outlet, date, out)
+
 
 # ------------------------------------------------------------------ job 상태
 class Job:
@@ -336,6 +352,7 @@ class JobStore:
                 continue
             job = Job(self.root, st)
             st.setdefault("source", {})["site"] = site_of(st.get("source"))   # site 가 없던 예전 작업은 디시로 채워 화면에 보인다
+            st.pop("factcheck_running", None)      # 사실 확인 다시 하기 도중에 꺼졌으면 플래그만 지운다(기록은 끝날 때만 바뀐다)
             if st.get("status") == "running":      # 서버가 도중에 꺼졌음 → 이어 하려면 continue
                 for s in st["steps"]:
                     if s["status"] == "running":
@@ -609,7 +626,136 @@ def step_read(c: Ctx) -> None:
              "source_text": "\n".join(parts), "attachments": atts}
     c.write_json("topic.json", topic)
     c.job.artifact("topic", "topic.json")
+    c.progress(0.95, "사실 확인 중 (정보성 글이면 뉴스와 대조)")
+    run_factcheck(c.job, c.deps)
     c.progress(1.0, f"자료 읽기 끝 — 글자 {len(topic['source_text'])}자")
+
+
+# ------------------------------------------------------------------ 사실 확인(정보성 글)
+def fc_input(topic: dict) -> tuple[str, str]:
+    """사실 확인의 입력: 분류에 넣는 제목(topic)과 본문(source_text). 입력 해시도 이 둘로 만든다."""
+    return (topic.get("topic") or ""), (topic.get("source_text") or "")
+
+
+_FC_NOTE = {"skipped": "일반 글이라 건너뜀", "pass": "보도로 확인됨",
+            "warn": "보도로 확인되지 않은 주장이 있음 — 확인해 주세요",
+            "stop": "사실 아님 판정 — 고치거나 직접 확인해 주세요"}
+
+
+def run_factcheck(job: Job, deps: Deps, *, force: bool = False) -> dict:
+    """사실 확인 한 번: 분류 → (정보성·불확실이면, 또는 강제면) 판정 → factcheck.json → topic.json 의 세 키 → 정책 표시.
+    읽기 단계의 하위 단계이고 '다시 확인'에서도 쓴다. 확인이 실패해도 예외를 내지 않고 failed 기록으로 남긴다."""
+    topic_p = job.dir / "topic.json"
+    title, text = fc_input(json.loads(topic_p.read_text(encoding="utf-8")))
+    job.set_sub("read", "사실 확인", "running")
+    cls = ver = None
+    try:
+        cls = deps.factcheck_classify(title, text, force)
+        if force or cls.get("kind") != "general":
+            ver = deps.factcheck_verify(cls.get("claims") or [])
+        rec = fc.build_record(title, text, cls, ver, forced=force)
+    except fc.FactcheckError as e:
+        rec = fc.build_record(title, text, cls, ver, error=str(e), forced=force)
+    except Exception as e:  # noqa: BLE001  사실 확인 실패가 읽기 단계를 멈추지 않게 — 자세한 기록은 작업 폴더에
+        write_error_log(job, "사실 확인", e)
+        rec = fc.build_record(title, text, cls, ver, error="사실 확인 중 오류가 났습니다. 다시 확인해 주세요.", forced=force)
+    fc.save_record(job.dir, rec)
+    topic = json.loads(topic_p.read_text(encoding="utf-8"))      # 확인하는 동안 글이 바뀌었으면 바뀐 글을 그대로 둔다
+    topic.update(fc.topic_additions(rec))
+    topic_p.write_text(json.dumps(topic, ensure_ascii=False, indent=2), encoding="utf-8")
+    with job.lock:
+        job.state["factcheck_policy"] = fc.POLICY_VERSION
+        job.save()
+    if rec["status"] == "failed":
+        note = rec.get("error") or "사실 확인에 실패했습니다"
+    else:
+        note = _FC_NOTE.get(rec["status"], "확인 결과 없음")
+    job.set_sub("read", "사실 확인", "error" if rec["status"] in ("stop", "failed") else "done", note)
+    return rec
+
+
+def factcheck_status(job: Job) -> dict:
+    """사실 확인 상태의 한 곳. record: 기록(없으면 None), gate·gate_reason: 막힘 판단(fc.gate),
+    stale: 기록이 지금 글과 다름, missing: 정책 작업인데 기록이 없음, legacy: 기능 이전 작업(정책 표시 없음 — 막지 않음)."""
+    policy = job.state.get("factcheck_policy")
+    record = fc.load_record(job.dir) if policy is not None else None
+    try:
+        topic = json.loads((job.dir / "topic.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        topic = {}
+    title, text = fc_input(topic if isinstance(topic, dict) else {})
+    gate, reason = fc.gate(record, title, text, policy)
+    return {"record": record, "gate": gate, "gate_reason": reason,
+            "stale": record is not None and record.get("input_hash") != fc.input_hash(title, text),
+            "missing": policy is not None and record is None, "legacy": policy is None}
+
+
+def factcheck_view(job: Job) -> dict | None:
+    """화면(GET job)의 factcheck: 기록에서 input_hash 를 뺀 값에 판단 키를 더한 것. 기능 이전 작업이거나 읽기 전이면 None."""
+    s = factcheck_status(job)
+    running = bool(job.state.get("factcheck_running"))
+    if s["legacy"]:
+        return None
+    if s["record"] is None:
+        if job.step("read")["status"] not in ("done", "waiting"):
+            return None
+        return {"status": "missing", "claims": [], "gate": s["gate"], "gate_reason": s["gate_reason"],
+                "stale": False, "running": running}
+    rec = {k: v for k, v in s["record"].items() if k != "input_hash"}
+    return {**rec, "stale": s["stale"], "gate": s["gate"], "gate_reason": s["gate_reason"], "running": running}
+
+
+def script_factcheck_flags(job: Job) -> list[dict]:
+    """대본 사실 검수에 걸린 곳(script_final/script_check.json 의 factcheck_flags). 있으면 대본 단계에서 멈춘다."""
+    try:
+        check = json.loads((job.dir / "script_final" / "script_check.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return list(check.get("factcheck_flags") or []) if isinstance(check, dict) else []
+
+
+def recheck_factcheck(runner: "Runner", job: Job, force: bool = False) -> None:
+    """사실 확인을 다시 한다(대기열 거침). 작업이 돌고 있거나 읽기가 끝나지 않았으면 Busy.
+    끝나면 읽기를 확인 대기로 두고, 대본 이후 단계는 되돌리고, 지난 뉴스 카드는 지운다."""
+    with job.lock:
+        if job.state["status"] == "running":
+            raise Busy("지금 작업 중입니다 — 끝난 뒤에 다시 시도하세요")
+        if job.step("read")["status"] not in ("waiting", "done"):
+            raise Busy("자료 읽기가 끝난 뒤에 사실 확인을 다시 할 수 있습니다")
+        job.state["factcheck_running"] = True
+        runner.submit(job, fn=lambda j: _do_recheck(j, runner.deps, force), detail="사실 확인을 다시 하는 중")
+
+
+def _do_recheck(job: Job, deps: Deps, force: bool) -> None:
+    """runner 대기열에서 도는 다시 확인 본체(읽기 하위 단계만 다시 한다)."""
+    try:
+        run_factcheck(job, deps, force=force)
+        with job.lock:
+            if job.step("script")["status"] != "todo":
+                job.reset_from("script")
+                job.log("사실 확인을 다시 함 — 대본부터 다시 합니다")
+            _drop_news_cards(job)
+            job.update_step("read", status="waiting", ended_at=now(), progress=1.0)
+            job.set_status("waiting")
+    finally:
+        with job.lock:
+            job.state.pop("factcheck_running", None)
+            job.save()
+
+
+def _drop_news_cards(job: Job) -> None:
+    """지난 사실 확인의 뉴스 카드 그림과 assets.json 의 뉴스 항목을 지운다."""
+    shutil.rmtree(job.dir / "assets" / "news", ignore_errors=True)
+    p = job.dir / "assets" / "assets.json"
+    if not p.is_file():
+        return
+    try:
+        entries = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    kept = [e for e in entries if e.get("role") != "news"]
+    if len(kept) != len(entries):
+        p.write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 # ------------------------------------------------------------------ 단계: script
@@ -619,6 +765,44 @@ def _copy_script_files(job: Job) -> None:
     for name in ("script.json", "script_check.json", "script_draft.json", "script_draft_check.json"):
         if (job.dir / "script" / name).is_file():
             shutil.copy(job.dir / "script" / name, dst / name)
+
+
+_FC_FIELD = {"title": "제목", "hook": "훅", "closing": "끝 줄"}
+_FC_VERDICT = {"false": "사실 아님", "unverified": "확인 안 된"}
+
+
+def _fc_flag_text(f: dict) -> str:
+    """대본 검수 한 곳을 검수 화면에 보일 한 줄로."""
+    if f["verdict"] == "error":
+        return f"사실 확인: 대본을 검수하지 못했습니다 — 대본을 직접 확인해 주세요({f['text']})"
+    where = f"문장 {f['index'] + 1}" if f["field"] == "sentence" else _FC_FIELD.get(f["field"], f["field"])
+    action = "삭제했습니다" if f["field"] == "sentence" and f["verdict"] == "false" else "확인하세요"
+    return f"사실 확인: {where}이 {_FC_VERDICT[f['verdict']]} 주장({f['claim_id']})을 사실처럼 말합니다 — {action}"
+
+
+def _script_factcheck(c: Ctx, script: dict, check: dict, rec: dict) -> tuple[dict, dict]:
+    """대본을 사실 기록과 맞춰 본다. 사실 아님으로 판정된 주장을 본문 문장이 사실처럼 말하면 그 문장을 지우고,
+    그 밖의 곳은 flag 만 남긴다. 검수 호출이 실패해도 대본 단계는 실패하지 않고, 사람이 볼 flag 를 하나 남긴다."""
+    c.sub("사실 확인", "running")
+    try:
+        found = c.deps.factcheck_script_check(script, rec)
+    except fc.FactcheckError as e:
+        found = [{"field": None, "index": None, "claim_id": None, "verdict": "error", "text": str(e)}]
+    drop = {f["index"] for f in found if f["field"] == "sentence" and f["verdict"] == "false"}
+    deleted, kept = [], []
+    for i, s in enumerate(script.get("sentences") or []):
+        if i in drop:
+            deleted.append({"index": i, "text": s.get("text") or "", "reason": "사실 확인: 사실 아님 주장을 사실처럼 말해 뺌"})
+        else:
+            kept.append(s)
+    script = {**script, "sentences": kept}
+    check = {**check, "deleted": list(check.get("deleted") or []) + deleted, "factcheck_flags": found,
+             "flags": list(check.get("flags") or []) + [_fc_flag_text(f) for f in found],
+             "ok": bool(check.get("ok")) and not found}
+    c.write_json("script/script.json", script)                   # 복사본(script_final)과 어긋나지 않게 원본 쪽도 고친다
+    c.write_json("script/script_check.json", check)
+    c.sub("사실 확인", "error" if found else "done", f"플래그 {len(found)}곳" + (f" · 문장 {len(deleted)}개 뺌" if deleted else ""))
+    return script, check
 
 
 def step_script(c: Ctx) -> None:
@@ -641,6 +825,9 @@ def step_script(c: Ctx) -> None:
             c.progress(0.9, "사실 가드 확인 중")
 
     script, check = generate_script(topic, c.dir / "script", llm, refine=bool(c.opt["refine"]), on_stage=on_stage)
+    rec = fc.load_record(c.dir)
+    if rec and any(x.get("verdict") in ("false", "unverified") for x in rec.get("claims") or []):
+        script, check = _script_factcheck(c, script, check, rec)
     _copy_script_files(c.job)
     ref = check.get("refine") or {}
     c.sub("사실 가드", "done" if check["ok"] else "error",
@@ -681,17 +868,19 @@ def step_voice(c: Ctx) -> None:
 
 # ------------------------------------------------------------------ 단계: assets
 def sentence_infos(script: dict, timings: dict) -> list[dict]:
-    """타이밍 index(0=훅, 1..=본문, 마지막=끝 줄)마다 {index, role, text, hint}."""
+    """타이밍 index(0=훅, 1..=본문, 마지막=끝 줄)마다 {index, role, text, hint, evidence}.
+    evidence 는 본문 문장의 근거 구절이다(없으면 ""). 뉴스 카드 그림은 이 근거와 같은 문장에만 붙는다."""
     body = script.get("sentences") or []
     out = []
     for s in timings["sentences"]:
         i, role = s["index"], s.get("role", "body")
-        hint = ""
+        hint, evidence = "", ""
         if role == "hook":
             hint = "영상 첫 화면: 주제 전체를 한눈에 보여 주는 분위기 있는 장면 — " + " ".join(script.get("title_lines") or [])
         elif role == "body" and 0 <= i - 1 < len(body):
             hint = body[i - 1].get("image_hint") or ""
-        out.append({"index": i, "role": role, "text": s["text"], "hint": hint})
+            evidence = body[i - 1].get("evidence") or ""
+        out.append({"index": i, "role": role, "text": s["text"], "hint": hint, "evidence": evidence})
     return out
 
 
@@ -923,6 +1112,42 @@ def post_body_attachment(job_dir: Path, atts: list[dict]) -> dict | None:
     return {"n": 0, "file": "post/body.png", "kind": "글 본문 캡처", "summary": "글 본문", "body": True}
 
 
+NEWS_CARDS_MAX = 2   # 뉴스 카드는 기사 주소 두 개까지
+
+
+def _news_cards(c: Ctx, topic: dict) -> list[dict]:
+    """사실 확인에서 찾은 출처 기사마다 뉴스 카드 한 장 → assets/news/card_NN.png(기사 주소 최대 2개).
+    그리기가 실패한 장은 로그만 남기고 건너뛴다. 단계는 실패하지 않는다."""
+    facts = topic.get("facts") or []
+    urls = list(dict.fromkeys(f["source"] for f in facts if f.get("source")))[:NEWS_CARDS_MAX]
+    if not urls:
+        return []
+    meta: dict[str, dict] = {}
+    for cl in (fc.load_record(c.dir) or {}).get("claims") or []:
+        for s in cl.get("sources") or []:
+            meta.setdefault(s.get("url"), s)
+    (c.dir / "assets" / "news").mkdir(parents=True, exist_ok=True)
+    c.sub("뉴스 카드", "running")
+    made = []
+    for url in urls:
+        fact = next(f for f in facts if f.get("source") == url)
+        m = meta.get(url) or {}
+        outlet = str(m.get("outlet") or "")
+        title = str(m.get("title") or "") or outlet                 # 제목이 없으면 언론사 이름을 쓴다
+        date = m.get("date")
+        out = c.dir / "assets" / "news" / f"card_{len(made) + 1:02d}.png"
+        try:
+            c.deps.draw_news_card(title, outlet, date, out)
+        except Exception as e:  # noqa: BLE001  카드는 있으면 좋은 것 — 이 장만 건너뛴다
+            c.log(f"뉴스 카드 그리기 실패(건너뜀): {errors.reason(e)}")
+            continue
+        made.append({"file": rel(c.job, out), "kind": "cap", "role": "news", "status": "ok",
+                     "fact_id": fact.get("id"), "fact_text": fact.get("text"), "source_url": url,
+                     "outlet": outlet, "title": title, "date": date})
+    c.sub("뉴스 카드", "done" if len(made) == len(urls) else "error", f"{len(made)}장")
+    return made
+
+
 def step_assets(c: Ctx) -> None:
     from recap_shorts.images import provider, regions
     from recap_shorts.images.captures import make_cards_for_image
@@ -1038,6 +1263,8 @@ def step_assets(c: Ctx) -> None:
             c.log(f"{where} 글 머리 카드 실패: {errors.reason(e)}")
     nf = sum(1 for e in entries if e.get("role") == "focus")
     c.sub("캡처 카드", "done", f"{len(entries)}장 (문장 부분 {nf}장)")
+    # 1-1) 뉴스 카드 — 사실 확인에서 찾은 기사(정보성 글만). 기사 화면 대신 우리가 그린 카드다.
+    entries += _news_cards(c, topic)
     # 1-2) 대상 사진 — 대본이 말하는 캐릭터·작품 등의 실제 사진(위키백과·공용). 실패해도 작업은 계속한다.
     if c.opt.get("entity_images", True):
         c.sub("대상 사진", "running")
@@ -1392,15 +1619,19 @@ def make_description(job: Job) -> str:
     for e in refs:
         r = e["ref"]
         lines.append(f"  · 참고 이미지 「{r.get('name')}」: {r.get('site')} {r.get('page_url')} ({r.get('licence')}{', ' + r['artist'] if r.get('artist') else ''})")
+    status_note, news = fc.description_notice(fc.load_record(job.dir))
+    if news:
+        lines += ["", "[뉴스 출처]"] + [f"- {n}" for n in news]
     memes = meme_credits(job)
     if memes:
         lines += ["", "[짤]"] + [f"- {m}" for m in memes]
     credits = sfx_credits(job)
     if credits:
         lines += ["", "[효과음]"] + [f"- {c}" for c in credits]
-    notes = ["내용은 위 커뮤니티 게시글 기준이며 공식 기록과 대조하지 않았습니다."]
-    if any(a.get("fan_made") for a in atts):
-        notes[0] = "내용은 위 커뮤니티 게시글 기준이며, 팬이 만든 자료(확인되지 않음)가 포함돼 있습니다."
+    notes = [status_note]
+    if any(a.get("fan_made") for a in atts):       # 팬 제작 자료가 있으면 그 고지를 앞에 둔다(사실 확인 고지는 뒤에)
+        fan = "내용은 위 커뮤니티 게시글 기준이며, 팬이 만든 자료(확인되지 않음)가 포함돼 있습니다."
+        notes = [fan] if status_note == fc.DEFAULT_NOTE else [fan, status_note]
     if ai_used:
         notes.append("일부 장면은 AI로 생성한 이미지입니다(실제 인물·현장 사진이 아님).")
     voice = json.loads((job.dir / "voice" / "timings.json").read_text(encoding="utf-8")).get("engine")
@@ -1541,7 +1772,12 @@ class Runner:
                 job.set_status("error")
                 return
             auto = set(job.options.get("auto_steps") or [])
-            if key in CONFIRM_STEPS and key not in auto:
+            hold = key in CONFIRM_STEPS and key not in auto
+            if key == "read" and factcheck_status(job)["gate"] != "clear":
+                hold = True        # 사실 확인이 통과하지 않았으면 auto_steps 여도 멈춘다(주의는 확인하고 계속, 막힘은 고칠 때까지)
+            if key == "script" and script_factcheck_flags(job):
+                hold = True        # 대본 사실 검수에 걸린 곳이 있으면 자동 진행이어도 멈춘다
+            if hold:
                 job.update_step(key, status="waiting", ended_at=now(), progress=1.0)
                 job.log(f"{st['label']} 끝 ({time.time() - t0:.0f}초) — 확인을 기다리는 중")
                 job.set_status("waiting")
@@ -1567,16 +1803,28 @@ class Busy(RuntimeError):
     pass
 
 
+class FactcheckBlocked(RuntimeError):
+    """사실 확인 때문에 읽기 단계를 넘길 수 없다. str(e) 는 화면에 그대로 보이는 사유다."""
+
+
 def continue_job(runner: Runner, job: Job) -> None:
-    """waiting 단계를 done 으로 넘기고 다음으로, error 면 그 단계부터 다시. 실행 중이면 Busy."""
+    """waiting 단계를 done 으로 넘기고 다음으로, error 면 그 단계부터 다시. 실행 중이면 Busy.
+    첫 확인 단계가 읽기이고 사실 확인이 막혀 있으면 FactcheckBlocked(상태는 그대로). 주의 판정이면 확인 기록(ack)을 남기고 넘긴다."""
     with job.lock:
         if job.state["status"] == "running":
             raise Busy("지금 작업 중입니다")
         if job.state["status"] == "done":
             return
-        for s in job.state["steps"]:
-            if s["status"] == "waiting":
-                s.update(status="done", ended_at=s.get("ended_at") or now())
-                break
+        waiting = next((s for s in job.state["steps"] if s["status"] == "waiting"), None)
+        if waiting and waiting["key"] == "read":
+            st = factcheck_status(job)
+            if st["gate"] == "blocked":
+                raise FactcheckBlocked(st["gate_reason"])
+            if st["gate"] == "need_ack":
+                rec = st["record"]
+                rec["ack"] = {"at": now(), "input_hash": rec["input_hash"]}
+                fc.save_record(job.dir, rec)
+        if waiting:
+            waiting.update(status="done", ended_at=waiting.get("ended_at") or now())
         job.save()
     runner.submit(job, detail="이어서 진행")
