@@ -1,7 +1,7 @@
 import { ApiError } from "./apiError";
 import { fmtWhen } from "./lib";
 import { mockLibraryFileUrl, mockRequest, mockWav } from "./mock";
-import type { AssetEntry, SensitiveInfo, BestResponse, BestSort, Channel, DuplicateJob, GeminiModels, Health, JobState, ModelsView, Scenes, ScriptDoc, Settings, SettingsPatch, SettingsTestResult, Storage, Timeline, TopicsResponse, VoiceTimings, ReviewJson, IntroPreview, CapCutResult, LibKind, LibraryAddResult, LibraryChange, LibraryList, PackDetail, PackSummary } from "./types";
+import type { AssetEntry, SensitiveInfo, BestResponse, BestSort, Channel, DuplicateJob, GeminiModels, Health, JobState, ModelsView, Scenes, ScriptDoc, Settings, SettingsPatch, SettingsTestResult, Storage, Timeline, TopicsResponse, VoiceTimings, ReviewJson, IntroPreview, CapCutResult, LibKind, LibraryAddResult, LibraryChange, LibraryList, PackDetail, PackSummary, TopicFcEstimate, TopicFcStatus } from "./types";
 
 const qs = new URLSearchParams(location.search);
 if (qs.get("mock") === "1") { try { sessionStorage.setItem("mock", "1"); } catch { /* 저장 못 해도 괜찮음 */ } }
@@ -49,6 +49,11 @@ export const api = {
   setChannel: (b: { main_topic: string | null; custom?: string | null }) => req<Channel>("PUT", "/api/channel", b),
   refreshBest: (sort: BestSort, hours: number, pages: number, source: TopicSource = "dcbest") =>
     req<BestResponse>("POST", "/api/topics/refresh", source === "blind" ? { source, sort, hours } : { source, sort, hours, pages }),
+  topicFcEstimate: (source: TopicSource, nos: (string | number)[], force = false) =>
+    req<TopicFcEstimate>("POST", "/api/topics/factcheck/estimate", { source, nos, force }),
+  topicFcRun: (run_id: string) => req<{ started: boolean; total: number; run_id: string }>("POST", "/api/topics/factcheck/run", { run_id }),
+  topicFcStatus: () => req<TopicFcStatus>("GET", "/api/topics/factcheck/status"),
+  topicFcCancel: () => req<TopicFcStatus>("POST", "/api/topics/factcheck/cancel"),
   createJob: (b: CreateJobBody) => req<{ id: string }>("POST", "/api/jobs", b),
   jobs: () => req<JobState[]>("GET", "/api/jobs"),
   job: (id: string) => req<JobState>("GET", `/api/jobs/${id}`),

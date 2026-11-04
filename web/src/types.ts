@@ -83,6 +83,23 @@ export interface BestTopic {
   fit?: 0 | 1 | 2;
   /** 우리가 이미 만든 글이면 표시(없으면 null). */
   made?: Made | null;
+  fc?: TopicFactcheck | null;
+}
+export interface TopicFactcheck {
+  kind: "news" | "general" | "uncertain";
+  status: "false" | "partly" | "true" | "unverified" | "failed" | null;
+  chip: { label: string; color: "bad" | "warn" | "outline" | "ok" } | null;
+  why: string | null; sources: { url: string; outlet: string; date: string }[] | null;
+  at: string | null; expired: boolean;
+}
+export interface TopicFcEstimate {
+  run_id: string; news: number; todo: number; done: number; classification_usd: number;
+  est_usd: number; per_item_usd: number; capped: boolean; selected_nos: (string | number)[];
+}
+export interface TopicFcStatus {
+  run_id: string | null; source: "dcbest" | "blind" | null;
+  state: "idle" | "running" | "cancelling" | "done" | "stopped" | "failed";
+  done: number; total: number; cost_usd: number; stop_reason: string | null; error: string | null;
 }
 export type BestSort = "views" | "comments" | "recent";
 /** source: dcbest(디시 실시간 베스트) | blind(블라인드 토픽 베스트 — triage 는 "skipped"). */
@@ -93,6 +110,7 @@ export interface BestResponse {
   channel: { main_topic: string; label: string } | null; fit: "off" | "ok" | "partial" | "unavailable"; fit_note: string; unfit_count: number;
   /** made_count: 만든 글·비슷한 이야기로 표시된 항목 수, made_same_count: 그중 같은 글, made_hidden: hide_made 로 뺀 수. */
   made_count?: number; made_same_count?: number; made_hidden?: number;
+  fc_counts: { news: number; checked: number; doubt: number }; fc_ready: boolean; fc_note: string | null;
 }
 /** GET/PUT /api/channel — main_topic: null(없음) | 프리셋 id | "custom"(직접 입력 글은 custom). */
 export interface ChannelPreset { id: string; label: string; desc: string }
