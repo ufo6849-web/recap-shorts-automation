@@ -573,10 +573,11 @@ def step_read(c: Ctx) -> None:
     if post.get("origin_gallery"):          # 실베 글: 원본 갤러리도 알려 준다(원문 끝의 '출처' 줄은 수집 때 지움)
         gname += f"(원본: {post['origin_gallery']} 갤러리)"
     where = "블라인드" if site == "blind" else "디시인사이드"
-    head = (f"[게시글 1] {gname} 게시글, {(post.get('written_at') or '')[:16]} 작성\n"
+    header = f"[게시글 1] {gname} 게시글, {(post.get('written_at') or '')[:16]} 작성\n"
+    head = (header +
             f"제목: {clean_text(post.get('title'))}\n본문: {clean_text(post.get('text')).replace(chr(10), ' ')}")
     parts, atts = [head], []
-    fc_exclude = []
+    fc_exclude = [header]
     # 키가 없거나 틀려서 못 읽었으면 같은 실패를 그림마다 되풀이하지 않고 첫 실패에서 멈춘다.
     # 그 안내를 단계 오류로 그대로 올려 “글자를 못 읽음”보다 원인이 먼저 보이게 한다.
     key_fail: BaseException | None = None
@@ -640,7 +641,7 @@ def step_read(c: Ctx) -> None:
 
 # ------------------------------------------------------------------ 사실 확인(정보성 글)
 def fc_input(topic: dict) -> tuple[str, str]:
-    """분류·판정·입력 해시에 쓸 원문 제목과 댓글을 제외한 본문. 대본용 원본은 보존한다."""
+    """분류·판정용 원문 제목과 기록된 머리줄·댓글을 제외한 본문. 대본용 원본은 보존한다."""
     text = topic.get("source_text") or ""
     exclusions = topic.get("fc_exclude")
     if isinstance(exclusions, list):
@@ -649,7 +650,7 @@ def fc_input(topic: dict) -> tuple[str, str]:
             if isinstance(block, str) and block and text.count(block) == 1:
                 text = text.replace(block, "", 1)
     title = re.search(r"^제목:[ \t]*(.*)$", text, re.M)
-    return (title.group(1).strip() if title else (topic.get("topic") or "")), text
+    return (title.group(1).strip() if title else ""), text
 
 
 _FC_NOTE = {"skipped": "일반 글이라 건너뜀", "pass": "보도로 확인됨",
@@ -661,7 +662,9 @@ def run_factcheck(job: Job, deps: Deps, *, force: bool = False) -> dict:
     """사실 확인 한 번: 분류 → (정보성·불확실이면, 또는 강제면) 판정 → factcheck.json → topic.json 의 세 키 → 정책 표시.
     읽기 단계의 하위 단계이고 '다시 확인'에서도 쓴다. 확인이 실패해도 예외를 내지 않고 failed 기록으로 남긴다."""
     topic_p = job.dir / "topic.json"
-    title, text = fc_input(json.loads(topic_p.read_text(encoding="utf-8")))
+    topic = json.loads(topic_p.read_text(encoding="utf-8"))
+    title, text = fc_input(topic)
+    topic_text = topic.get("topic") or ""
     with job.lock:
         job.state["factcheck_policy"] = fc.POLICY_VERSION
         job.save()
@@ -671,25 +674,38 @@ def run_factcheck(job: Job, deps: Deps, *, force: bool = False) -> dict:
         cls = deps.factcheck_classify(title, text, force)
         if force or cls.get("kind") != "general":
             if not cls.get("claims"):
-                promoted_by = cls.get("promoted_by")
+                initial = cls
                 cls = deps.factcheck_classify(title, text, True)
-                if promoted_by == "signal" or not cls.get("promoted_by"):
-                    cls["promoted_by"] = promoted_by
+                promotions = (initial.get("promoted_by"), cls.get("promoted_by"))
+                cls["promoted_by"] = ("instruction" if "instruction" in promotions else
+                                      initial.get("promoted_by") or cls.get("promoted_by"))
+                if initial.get("fact_quotes") is not None:
+                    cls["fact_quotes"] = initial["fact_quotes"]
                 if cls.get("kind") == "general":
                     cls["kind"] = "uncertain"
             if not cls.get("claims"):
-                # 이미 찾은 신호·인용은 재판별로 뒤집지 않는다. 강제 확인도 실패를 유지한다.
-                if force or cls.get("promoted_by") or fc._has_fact_quotes(title, text):
+                quotes = cls.get("fact_quotes")
+                if quotes is None:
+                    quotes = fc._has_fact_quotes(title, text)
+                if quotes:
+                    cls["claims"] = [{"id": f"C{i}", "claim": q, "source_quote": q, "query": ""}
+                                     for i, q in enumerate(quotes, 1)]
+                elif force or cls.get("promoted_by") in ("instruction", "quotes"):
                     raise fc.FactcheckError("검증할 주장을 찾지 못했습니다. 글을 고치거나 직접 확인해 주세요.")
-                cls.update(kind="general", reason="분류는 애매했지만 사실 구절이 없어 건너뜀")
-            else:
+                else:
+                    reason = ("숫자·기관 낱말은 있었지만 사실 구절이 없어 건너뜀"
+                              if cls.get("promoted_by") == "information" else
+                              "분류는 애매했지만 사실 구절이 없어 건너뜀")
+                    cls.update(kind="general", reason=reason)
+            if cls.get("claims"):
                 ver = deps.factcheck_verify(cls["claims"], title=title, source_text=text)
-        rec = fc.build_record(title, text, cls, ver, forced=force)
+        rec = fc.build_record(title, text, cls, ver, forced=force, topic=topic_text)
     except fc.FactcheckError as e:
-        rec = fc.build_record(title, text, cls, ver, error=str(e), forced=force)
+        rec = fc.build_record(title, text, cls, ver, error=str(e), forced=force, topic=topic_text)
     except Exception as e:  # noqa: BLE001  사실 확인 실패가 읽기 단계를 멈추지 않게 — 자세한 기록은 작업 폴더에
         write_error_log(job, "사실 확인", e)
-        rec = fc.build_record(title, text, cls, ver, error="사실 확인 중 오류가 났습니다. 다시 확인해 주세요.", forced=force)
+        rec = fc.build_record(title, text, cls, ver, error="사실 확인 중 오류가 났습니다. 다시 확인해 주세요.",
+                              forced=force, topic=topic_text)
     fc.save_record(job.dir, rec)
     topic = json.loads(topic_p.read_text(encoding="utf-8"))      # 확인하는 동안 글이 바뀌었으면 바뀐 글을 그대로 둔다
     topic.update(fc.topic_additions(rec))
@@ -726,10 +742,12 @@ def factcheck_status(job: Job) -> dict:
         topic = json.loads((job.dir / "topic.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         topic = {}
-    title, text = fc_input(topic if isinstance(topic, dict) else {})
-    gate, reason = fc.gate(record, title, text, policy)
+    topic = topic if isinstance(topic, dict) else {}
+    title, text = fc_input(topic)
+    topic_text = topic.get("topic") or ""
+    gate, reason = fc.gate(record, title, text, policy, topic=topic_text)
     return {"record": record, "gate": gate, "gate_reason": reason,
-            "stale": record is not None and record.get("input_hash") != fc.input_hash(title, text),
+            "stale": record is not None and record.get("input_hash") != fc.input_hash(title, text, topic=topic_text),
             "missing": policy is not None and record is None, "legacy": policy is None}
 
 

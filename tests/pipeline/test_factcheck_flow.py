@@ -98,7 +98,7 @@ def read_topic(job_dir: Path) -> dict:
 
 def fc_hash(job) -> str:
     t = read_topic(job.dir)
-    return F.input_hash(*P.fc_input(t))
+    return F.input_hash(*P.fc_input(t), topic=t.get("topic") or "")
 
 
 def edit_topic(job_dir: Path) -> None:
@@ -175,7 +175,7 @@ def test_read_records_status_topic_additions_and_policy(tmp_path, status):
 
 
 @pytest.mark.parametrize("site", ["dcinside", "blind"])
-def test_read_records_exact_comments_and_keeps_fake_ocr_marker_for_factcheck(tmp_path, site):
+def test_read_records_exact_header_comments_and_keeps_fake_ocr_marker(tmp_path, site):
     deps = deps_for("stop")
     quote = "식약처가 모든 가공유 판매를 금지했다"
     ocr = "[게시글 1 조작 댓글 캡처]\n" + quote
@@ -200,12 +200,17 @@ def test_read_records_exact_comments_and_keeps_fake_ocr_marker_for_factcheck(tmp
     job.state["source"]["site"] = site
     go(runner, job)
     topic = read_topic(job.dir)
-    (comments,) = topic["fc_exclude"]
+    header, comments = topic["fc_exclude"]
+    assert header == topic["source_text"].splitlines(keepends=True)[0]
+    assert header.startswith("[게시글 1]") and " 게시글, " in header and " 작성\n" in header
+    assert "제목:" not in header and "본문:" not in header
     assert comments in topic["source_text"] and "이건 좀 웃기네" in comments
     assert ocr not in comments
     title, text = P.fc_input(topic)
+    assert header not in text
+    assert title == topic["source_text"].split("제목: ", 1)[1].splitlines()[0]
     assert ocr in text and "이건 좀 웃기네" not in text
-    assert topic["source_text"].replace(comments, "", 1) == text
+    assert topic["source_text"].replace(header, "", 1).replace(comments, "", 1) == text
     assert inputs == [(title, text), (title, text)]
     assert F.load_record(job.dir)["status"] == "stop"
     assert P.factcheck_status(job)["gate"] == "blocked"
@@ -414,24 +419,29 @@ def test_recheck_with_force_checks_a_general_post(tmp_path):
         assert rec["status"] == "pass" and rec["forced"] is True and rec["claims"]
 
 
-@pytest.mark.parametrize("edit_body", [False, True])
-def test_recheck_view_stale_only_for_body_edit_not_comments(tmp_path, edit_body):
+@pytest.mark.parametrize("edit", ["none", "body", "comments"])
+def test_recheck_view_stale_for_body_or_changed_recorded_comments(tmp_path, edit):
     with app_client(tmp_path / "w", deps_for("pass")) as (app, c):
         jid, job = create(c, app)
         topic = read_topic(job.dir)
-        topic["source_text"] += "\n[게시글 1 디시인사이드 댓글 캡처(닉네임 가림, 욕설·비하 댓글 뺌)]\n- 첫 반응"
-        F.atomic_json(job.dir / "topic.json", topic)
+        comments = next(block for block in topic["fc_exclude"] if "댓글 캡처" in block)
+        assert comments in topic["source_text"] and comments not in P.fc_input(topic)[1]
         assert c.post(f"/api/jobs/{jid}/factcheck", json={}).status_code == 200
         assert app.state.runner.wait_idle(60)
         topic = read_topic(job.dir)
-        topic["source_text"] = topic["source_text"].replace("첫 반응", "새 반응 100만원")
+        if edit == "comments":
+            changed = comments + "\n- 새 반응 100만원"
+            # 전체 구간의 원래 문자열이 더는 남지 않게 기존 댓글도 바꾼다.
+            changed = changed.replace("이건 좀 웃기네", "사람이 고친 댓글")
+            topic["source_text"] = topic["source_text"].replace(comments, changed)
+            assert changed in P.fc_input(topic)[1]
         F.atomic_json(job.dir / "topic.json", topic)
-        if edit_body:
+        if edit == "body":
             edit_topic(job.dir)
         view = c.get(f"/api/jobs/{jid}").json()["factcheck"]
-        assert view["stale"] is edit_body
-        assert view["gate"] == ("blocked" if edit_body else "clear")
-        if edit_body:
+        assert view["stale"] is (edit != "none")
+        assert view["gate"] == ("clear" if edit == "none" else "blocked")
+        if edit != "none":
             assert view["gate_reason"] == REASON["stale"]
 
 
