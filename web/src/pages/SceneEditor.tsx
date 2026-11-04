@@ -217,7 +217,7 @@ export default function SceneEditor({ id }: { id: string }) {
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">
                 <Chip>{entry?.role === "news" ? "뉴스" : (KIND[entry?.kind ?? ""] ?? "그림")}</Chip>
-                {entry?.kind === "cap" && (entry.needs_review && !entry.sensitive?.flagged ? <Chip tone="warn">가림 확인 필요</Chip> : <Chip tone="ok">{entry.blurred ? "가림 확인됨" : "확인함"}</Chip>)}
+                {entry?.kind === "cap" && entry.role !== "news" && (entry.needs_review && !entry.sensitive?.flagged ? <Chip tone="warn">가림 확인 필요</Chip> : <Chip tone="ok">{entry.blurred ? "가림 확인됨" : "확인함"}</Chip>)}
                 {entry?.sensitive && entry.sensitive.level !== "none" && <Chip tone={entry.sensitive.level === "strong" ? "bad" : "warn"}>자극적인 그림{entry.sensitive.treatment === "gray" ? " · 흑백" : entry.sensitive.treatment === "gray_blur" ? " · 흑백+흐림" : ""}</Chip>}
                 {entry?.recommend_regenerate && <Chip tone="warn">다시 만들기 추천</Chip>}
               </div>
