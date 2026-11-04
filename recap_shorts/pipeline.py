@@ -637,8 +637,18 @@ def step_read(c: Ctx) -> None:
 
 # ------------------------------------------------------------------ 사실 확인(정보성 글)
 def fc_input(topic: dict) -> tuple[str, str]:
-    """사실 확인의 입력: 분류에 넣는 제목(topic)과 본문(source_text). 입력 해시도 이 둘로 만든다."""
-    return (topic.get("topic") or ""), (topic.get("source_text") or "")
+    """분류·판정·입력 해시에 쓸 원문 제목과 댓글을 제외한 본문. 대본용 원본은 보존한다."""
+    lines = []
+    comments = False
+    for line in (topic.get("source_text") or "").splitlines(keepends=True):
+        if line.startswith("[게시글"):
+            # step_read가 디시·블라인드에 공통으로 붙이는 댓글 캡처 구간만 제외한다.
+            comments = bool(re.match(r"\[게시글 \d+ [^\r\n]*댓글 캡처", line))
+        if not comments:
+            lines.append(line)
+    text = "".join(lines)
+    title = re.search(r"^제목:[ \t]*(.*)$", text, re.M)
+    return (title.group(1).strip() if title else (topic.get("topic") or "")), text
 
 
 _FC_NOTE = {"skipped": "일반 글이라 건너뜀", "pass": "보도로 확인됨",

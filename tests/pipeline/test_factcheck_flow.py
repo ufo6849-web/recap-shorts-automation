@@ -98,13 +98,13 @@ def read_topic(job_dir: Path) -> dict:
 
 def fc_hash(job) -> str:
     t = read_topic(job.dir)
-    return F.input_hash(t.get("topic") or "", t.get("source_text") or "")
+    return F.input_hash(*P.fc_input(t))
 
 
 def edit_topic(job_dir: Path) -> None:
     """글을 고친다(입력 해시가 바뀐다). topic.json 만 바꾼다."""
     t = read_topic(job_dir)
-    t["source_text"] += "\n글쓴이가 한 줄 더 적었다."
+    t["source_text"] = "글쓴이가 한 줄 더 적었다.\n" + t["source_text"]
     (job_dir / "topic.json").write_text(json.dumps(t, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -375,6 +375,27 @@ def test_recheck_with_force_checks_a_general_post(tmp_path):
         assert app.state.runner.wait_idle(60)
         rec = F.load_record(job.dir)
         assert rec["status"] == "pass" and rec["forced"] is True and rec["claims"]
+
+
+@pytest.mark.parametrize("edit_body", [False, True])
+def test_recheck_view_stale_only_for_body_edit_not_comments(tmp_path, edit_body):
+    with app_client(tmp_path / "w", deps_for("pass")) as (app, c):
+        jid, job = create(c, app)
+        topic = read_topic(job.dir)
+        topic["source_text"] += "\n[게시글 1 디시인사이드 댓글 캡처(닉네임 가림, 욕설·비하 댓글 뺌)]\n- 첫 반응"
+        F.atomic_json(job.dir / "topic.json", topic)
+        assert c.post(f"/api/jobs/{jid}/factcheck", json={}).status_code == 200
+        assert app.state.runner.wait_idle(60)
+        topic = read_topic(job.dir)
+        topic["source_text"] = topic["source_text"].replace("첫 반응", "새 반응 100만원")
+        F.atomic_json(job.dir / "topic.json", topic)
+        if edit_body:
+            edit_topic(job.dir)
+        view = c.get(f"/api/jobs/{jid}").json()["factcheck"]
+        assert view["stale"] is edit_body
+        assert view["gate"] == ("blocked" if edit_body else "clear")
+        if edit_body:
+            assert view["gate_reason"] == REASON["stale"]
 
 
 # ---------------------------------------------------------------- 대본 뒤 검수
