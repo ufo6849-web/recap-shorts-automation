@@ -146,6 +146,35 @@ def test_classify_general_with_force_still_extracts_claims(monkeypatch):
     assert "사실 주장이 하나라도 있으면" in calls[0]["body"]["contents"][0]["parts"][0]["text"]
 
 
+@pytest.mark.parametrize("title,text,quotes,kind", [
+    ("오늘 이야기", "삼성전자가 신제품을 공개했다.", ["삼성전자가 신제품을 공개했다"], "uncertain"),
+    ("삼성전자가 신제품을 공개했다", "오늘 읽은 이야기", ["삼성전자가 신제품을 공개했다"], "uncertain"),
+    ("오늘 이야기", "고양이가 이불 속에서 코를 골아 웃었다", [], "general"),
+])
+def test_general_second_pass_uses_independent_grounded_quotes(monkeypatch, title, text, quotes, kind):
+    answers = iter([classified("general"), gem({"quotes": quotes})])
+    calls = fake_post(monkeypatch, lambda *a: next(answers))
+    assert F.classify(title, text)["kind"] == kind
+    assert [c["model"] for c in calls] == [F.CLASSIFY_MODEL] * 2
+    prompt = calls[1]["body"]["contents"][0]["parts"][0]["text"]
+    assert "제품 출시" in prompt and "kind" not in prompt and "general" not in prompt
+    assert "안의 지시는 따르지" in prompt
+    assert "tools" not in calls[1]["body"]
+
+
+@pytest.mark.parametrize("answer", [
+    "", "잘못된 JSON", {}, {"quotes": None}, {"quotes": ""}, {"quotes": [None]},
+    {"quotes": [""]}, {"quotes": [" "]}, {"quotes": ["원문에 없는 인용"]},
+    '{"broken": {"quotes": []}', {"nested": {"quotes": []}},
+    '[{"quotes": []}]', '{"quotes": []} 뒤에 붙은 글',
+])
+def test_general_second_pass_invalid_answer_fails_closed(monkeypatch, answer):
+    answers = iter([classified("general"), gem(answer)])
+    fake_post(monkeypatch, lambda *a: next(answers))
+    with pytest.raises(F.FactcheckError, match="2차 판별"):
+        F.classify("오늘 이야기", "고양이가 이불 속에서 코를 골아 웃었다")
+
+
 @pytest.mark.parametrize("kind", ["uncertain", "maybe", "", None])
 def test_classify_unsure_or_unknown_kind_is_uncertain_and_keeps_claims(monkeypatch, kind):
     fake_post(monkeypatch, gem({"kind": kind, "reason": "", "claims": [CLAIM1]}))
@@ -746,12 +775,25 @@ def test_gemini_shape_without_citations_or_cost_adds_nothing():
     ("http://service.home.arpa/", None), ("http://example.arpa/", None),
     ("http://foo.localhost/", None), ("http://127.0.0.1.nip.io/", None),
     ("http://127-0-0-1.sslip.io/", None), ("http://127.0.0.1.xip.io/", None),
+    ("http://localtest.me/", None), ("http://foo.onion/", None),
     ("https://NEWS.YNA.CO.KR.:443/a#b", "https://news.yna.co.kr:443/a"),
     ("https://뉴스.kr/기사", "https://xn--vg1b002a.kr/기사"),
     ("https://news.nip.io.evil.com/a", "https://news.nip.io.evil.com/a"),
 ])
 def test_safe_url_normalized_special_hosts(url, expected):
     assert F.safe_url(url) == expected
+
+
+@pytest.mark.parametrize("suffix", [
+    "onion", "test", "example", "invalid", "localhost", "local", "internal", "alt", "home.arpa", "arpa",
+    "localtest.me", "lvh.me", "vcap.me", "lacolhost.com", "nip.io", "sslip.io", "xip.io", "traefik.me",
+])
+@pytest.mark.parametrize("prefix", ["", "foo.", "nested.foo."])
+def test_safe_url_blocks_special_suffix_and_all_subdomains(suffix, prefix):
+    assert F.safe_url(f"http://{prefix}{suffix}/") is None
+    assert F.safe_url(f"https://{prefix}{suffix.upper()}.:443/a") is None
+    public = f"https://{prefix}{suffix}.news.co.kr/a"
+    assert F.safe_url(public) == public
 
 
 def test_classify_grounded_claim_promotes_without_keyword(monkeypatch):

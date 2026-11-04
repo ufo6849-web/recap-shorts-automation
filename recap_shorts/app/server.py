@@ -819,12 +819,16 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
     def factcheck_override(jid: str, body: dict = Body(...)):
         """사실 아님·확인 실패 판정을 사람이 직접 확인했다고 넘긴다(메모 1~500자). 글이 바뀌었으면 안 된다."""
         job = job_or_404(jid)
-        idle_or_409(job)
         note = body.get("note")
         note = note.strip() if isinstance(note, str) else ""
         if not 1 <= len(note) <= 500:
             raise HTTPException(400, "메모는 1~500자로 적어 주세요")
         with job.lock:
+            idle_or_409(job)
+            if job.state.get("factcheck_running"):
+                raise HTTPException(409, "사실 확인 중입니다 — 끝난 뒤에 다시 시도하세요")
+            if job.capcut_busy:
+                raise HTTPException(409, "캡컷 초안을 이미 만드는 중입니다")
             st = P.factcheck_status(job)
             rec = st["record"]
             if rec is None or rec.get("status") not in ("stop", "failed") or st["stale"]:
