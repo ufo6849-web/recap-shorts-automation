@@ -146,6 +146,8 @@ def screen_text(e, fallback: str = DEFAULT_FALLBACK, *, kind: str | None = None,
         return f"{who}연결 실패 — 인터넷 연결을 확인하세요"
     if k == HTTP:
         return f"요청을 처리하지 못했습니다(HTTP {code})" if code else "요청을 처리하지 못했습니다"
+    if provider == "openrouter" and "blockReason" in text:     # 거절 문구의 표식(blockReason=SAFETY)은 화면에 내지 않는다
+        return "OpenRouter 모델이 이 내용의 답을 거절했습니다 — 자료나 문장을 바꿔 보세요"
     return _clean(text, fallback)
 
 

@@ -612,4 +612,193 @@ def test_regen_stays_blocked_without_gemini_key(real_client, models_ok):
     (job.dir / "assets").mkdir(parents=True, exist_ok=True)
     (job.dir / "assets" / "assets.json").write_text(json.dumps([{"file": "ai_01.png", "kind": "ai"}]), encoding="utf-8")
     r = client.post(f"/api/jobs/{job.id}/assets/regenerate", json={"file": "ai_01.png"})
-    assert r.status_code == 503                                        # 그림 엔진(Gemini)은 Gemini 키 없이는 못 만든다
+    # 그림 엔진(Gemini)은 Gemini 키 없이는 못 만든다 — 엔진 가용성(503)보다 키 안내(409)가 먼저 보여야 한다
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "no_key"
+    assert r.json()["detail"]["message"].startswith("Gemini API 키가 없어 AI 그림 다시 만들기")
+
+
+# ---------------------------------------------------------------- 11. 키 값 가리기: 300자로 자르기 전에 가린다
+LONG_KEY = "sk-or-v1-" + "Qx7" * 18        # 63자: 300자 자르기 경계에 걸리도록 긴 오류 문구와 함께 쓴다
+
+
+def no_key_piece(key: str, text: str, n: int = 20) -> bool:
+    return not any(key[i:i + n] in text for i in range(len(key) - n + 1))
+
+
+def test_key_straddling_the_300_cut_is_masked_whole(monkeypatch, logs):
+    settings.save({"openrouter_api_key": LONG_KEY})
+    msg = "e" * 280 + LONG_KEY + " 뒤의 긴 설명 " * 3
+    monkeypatch.setattr(requests, "post", lambda *a, **k: Resp(401, {"error": {"message": msg}}))
+    with pytest.raises(GeminiApiError) as e:
+        G._post("anthropic/claude-opus-5.5", {"contents": []}, sleep=lambda s: None)
+    assert no_key_piece(LONG_KEY, str(e.value)) and no_key_piece(LONG_KEY, errors.screen_text(e.value))
+    assert "<key>" in str(e.value)
+
+
+def test_key_in_error_body_is_masked(monkeypatch, logs):
+    settings.save({"openrouter_api_key": LONG_KEY})
+    monkeypatch.setattr(requests, "post", lambda *a, **k: Resp(401, {"error": {"message": f"no key {LONG_KEY} here"}}))
+    with pytest.raises(GeminiApiError) as e:
+        G._post("anthropic/claude-opus-5.5", {"contents": []}, sleep=lambda s: None)
+    assert LONG_KEY not in str(e.value) and "no key <key> here" in str(e.value)
+
+
+def test_empty_key_inserts_no_placeholder(monkeypatch):
+    monkeypatch.setattr(requests, "post", lambda *a, **k: Resp(400, {"error": {"message": "bad"}}))
+    with pytest.raises(GeminiApiError) as e:
+        G._post_openrouter("anthropic/claude-opus-5.5", {"contents": []}, key="", sleep=lambda s: None)
+    assert str(e.value) == "OpenRouter 실패(anthropic/claude-opus-5.5): HTTP 400 — bad"
+
+
+def test_openrouter_key_is_read_once_per_call(monkeypatch, logs):
+    reads = []
+
+    def key_once():
+        reads.append(1)
+        return OR_KEY if len(reads) == 1 else ""             # 두 번째 조회는 사용자가 키를 지운 것처럼 빈 값
+    monkeypatch.setattr(G, "_openrouter_key", key_once)
+    auth = []
+    monkeypatch.setattr(requests, "post", lambda url, **kw: auth.append(kw["headers"]["Authorization"]) or or_ok("ok"))
+    assert G.generate_text("p", "anthropic/claude-opus-5.5", json=False) == "ok"
+    assert len(reads) == 1 and auth == [f"Bearer {OR_KEY}"]
+
+
+# ---------------------------------------------------------------- 12. 거절·빈 답은 OpenRouter 문구로
+@pytest.mark.parametrize("kw,block,screen", [
+    ({"finish": "content_filter"}, True, "OpenRouter 모델이 이 내용의 답을 거절했습니다 — 자료나 문장을 바꿔 보세요"),
+    ({"refusal": "I can't help with that."}, True, "OpenRouter 모델이 이 내용의 답을 거절했습니다 — 자료나 문장을 바꿔 보세요"),
+    ({"finish": "length"}, False, "OpenRouter 응답이 비어 있음(finishReason=length)"),
+])
+def test_openrouter_block_or_empty_answer_names_openrouter(monkeypatch, logs, kw, block, screen):
+    from recap_shorts.images import sensitive
+    use_keys(openrouter=True)
+    monkeypatch.setattr(requests, "post", lambda *a, **k: or_ok("", **kw))
+    with pytest.raises(GeminiApiError) as e:
+        G.generate_text("p", "google/gemini-3.8-flash", json=False)
+    assert e.value.provider == "openrouter"
+    assert errors.screen_text(e.value) == screen
+    assert sensitive._is_block(e.value) is block
+
+
+# ---------------------------------------------------------------- 13. 준비 상태: 작업 옵션·남은 단계
+def test_readiness_uses_job_script_option(models_ok):
+    use_keys(gemini=True)
+    assert settings.readiness()["ok"] is True
+    assert settings.readiness(script_model="anthropic/claude-opus-5.5") == {
+        "ok": False, "reason": "대본 모델(anthropic/claude-opus-5.5)은 OpenRouter 키가 필요합니다", "via": "gemini"}
+
+
+def test_readiness_uses_job_tts_option(models_ok):
+    use_keys(openrouter=True)
+    assert settings.readiness()["ok"] is True
+    assert settings.readiness(tts_engine="gemini") == {
+        "ok": False, "reason": "목소리가 Gemini 인데 Gemini 키가 없습니다 — 설정에서 로컬 목소리를 고르세요", "via": "openrouter"}
+
+
+def test_readiness_need_checks_only_the_steps_left(models_ok):
+    use_keys(openrouter=True)
+    settings.save(voice={"engine": "gemini"})
+    assert settings.readiness()["ok"] is False
+    assert settings.readiness(need={"read"})["ok"] is True          # 목소리는 이미 끝난 단계라 보지 않는다
+    assert settings.readiness(need={"voice"})["ok"] is False
+    assert settings.readiness(need=set()) == {"ok": True, "reason": None, "via": None}
+
+
+# ---------------------------------------------------------------- 14. 서버: 틀린 키·작업 옵션·남은 단계
+def waiting_job(app, done=(), waiting=None):
+    job = app.state.store.create(dict(SRC), {"auto_steps": []})
+    for s in job.state["steps"]:
+        if s["key"] in done:
+            s["status"] = "done"
+        elif s["key"] == waiting:
+            s["status"] = "waiting"
+    job.set_status("waiting")
+    return job
+
+
+BAD_OR = "OpenRouter API 키가 맞지 않습니다 — 설정에서 키를 확인하세요"
+
+
+def test_bad_openrouter_key_blocks_create(real_client, monkeypatch, models_ok):
+    client, _ = real_client
+    use_keys(openrouter=True)
+    fake_requests(monkeypatch, Resp(401))
+    client.post("/api/settings/test", json={"service": "openrouter"})
+    r = client.post("/api/jobs", json={"gallery": "baseball_new13", "no": 2101})
+    assert r.status_code == 409 and r.json()["detail"] == {"code": "no_key", "message": BAD_OR}
+
+
+def test_bad_openrouter_key_blocks_continue_and_assets_rerun(real_client, monkeypatch, models_ok):
+    client, app = real_client
+    use_keys(openrouter=True)
+    fake_requests(monkeypatch, Resp(401))
+    client.post("/api/settings/test", json={"service": "openrouter"})
+    job = waiting_job(app, done=("source",), waiting="read")
+    r = client.post(f"/api/jobs/{job.id}/continue")
+    assert r.status_code == 409 and r.json()["detail"]["message"] == BAD_OR
+    job = waiting_job(app, done=("source", "read", "script", "voice"))
+    r = client.post(f"/api/jobs/{job.id}/rerun", json={"from": "assets"})
+    assert r.status_code == 409 and r.json()["detail"]["message"] == BAD_OR
+
+
+def test_openrouter_402_and_429_clear_the_bad_mark(fake_client, monkeypatch, models_ok):
+    fake_client.put("/api/settings", json={"keys": {"openrouter_api_key": OR_KEY}})
+    ok = {"ok": True, "detail": "OpenRouter 키로 부름(Gemini 키 없음)"}
+    for code in (401, 402, 401, 429):
+        fake_requests(monkeypatch, Resp(code))
+        fake_client.post("/api/settings/test", json={"service": "openrouter"})
+        bad = fake_client.get("/api/health").json()["gemini_key"].get("bad") is True
+        assert bad is (code == 401)                              # 인증이 됐으면(402·429) 틀린 표시를 지운다
+    assert fake_client.get("/api/health").json()["gemini_key"] == ok
+
+
+def test_create_job_checks_script_option(real_client, models_ok):
+    client, _ = real_client
+    use_keys(gemini=True)
+    r = client.post("/api/jobs", json={"gallery": "baseball_new13", "no": 2101,
+                                       "options": {"script_model": "anthropic/claude-opus-5.5"}})
+    assert r.status_code == 409
+    assert r.json()["detail"]["message"] == "대본 모델(anthropic/claude-opus-5.5)은 OpenRouter 키가 필요합니다"
+
+
+def test_create_job_checks_tts_option(real_client, models_ok):
+    client, _ = real_client
+    use_keys(openrouter=True)
+    r = client.post("/api/jobs", json={"gallery": "baseball_new13", "no": 2101, "options": {"tts_engine": "gemini"}})
+    assert r.status_code == 409
+    assert r.json()["detail"]["message"] == "목소리가 Gemini 인데 Gemini 키가 없습니다 — 설정에서 로컬 목소리를 고르세요"
+
+
+def test_create_job_rejects_unknown_option_values(real_client, models_ok):
+    client, _ = real_client
+    use_keys(openrouter=True)
+    for opts in ({"script_model": "Not A Model!"}, {"tts_engine": "bogus"}):
+        r = client.post("/api/jobs", json={"gallery": "baseball_new13", "no": 2101, "options": opts})
+        assert r.status_code == 400, opts
+
+
+def test_create_job_keeps_stripped_script_option(real_client, models_ok):
+    client, app = real_client
+    use_keys(openrouter=True)
+    r = client.post("/api/jobs", json={"gallery": "baseball_new13", "no": 2101,
+                                       "options": {"script_model": " anthropic/claude-opus-5.5 "}})
+    assert r.status_code == 200
+    assert app.state.store.get(r.json()["id"]).options["script_model"] == "anthropic/claude-opus-5.5"
+
+
+def test_assets_rerun_does_not_check_the_voice_step(real_client, models_ok):
+    client, app = real_client
+    use_keys(openrouter=True)
+    settings.save(voice={"engine": "gemini"})                  # 목소리는 Gemini 인데 Gemini 키는 없다
+    job = waiting_job(app, done=("source", "read", "script", "voice"))
+    r = client.post(f"/api/jobs/{job.id}/rerun", json={"from": "assets"})
+    assert r.status_code == 200
+
+
+def test_continue_after_script_ignores_the_script_route(real_client, models_ok):
+    client, app = real_client
+    use_keys(gemini=True)
+    settings.save(models={"script": "anthropic/claude-opus-5.5"})     # 대본은 이미 끝났다 — 지금 OpenRouter 키가 없어도 된다
+    job = waiting_job(app, done=("source", "read"), waiting="script")
+    r = client.post(f"/api/jobs/{job.id}/continue")
+    assert r.status_code == 200
