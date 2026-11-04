@@ -317,7 +317,7 @@ def _verify_prompt(claims: list[dict], title: str = "", source_text: str = "") -
 
 def verify(claims: list[dict], *, title: str = "", source_text: str = "") -> dict:
     """주장을 웹 검색 보도와 대조한다(OpenRouter 전용). 출처는 검색 인용에 있는 것만 남기고,
-    true·partly 인데 출처가 없으면 unverified 로 내린다. 키가 없거나 호출이 실패하면 FactcheckError."""
+    true·partly·false 인데 출처가 없으면 unverified 로 내린다. 키가 없거나 호출이 실패하면 FactcheckError."""
     if not G._openrouter_key():
         raise FactcheckError(NO_OR_KEY)
     if not claims:
@@ -335,7 +335,7 @@ def verify(claims: list[dict], *, title: str = "", source_text: str = "") -> dic
         why = str(r.get("why") or "").strip() if r else "판정 결과가 없습니다."
         fact = (str(r.get("fact") or "").strip() or None) if verdict in ("true", "partly", "false") else None
         sources = _sources(r.get("sources"), cited)
-        if verdict in ("true", "partly") and not sources:
+        if verdict in ("true", "partly", "false") and not sources:
             verdict, fact = "unverified", None
             why = "인용된 출처가 없어 확인 불가로 내렸습니다." + (f" {why}" if public_event and why else "")
         if verdict == "unverified" and public_event:

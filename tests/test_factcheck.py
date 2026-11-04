@@ -313,12 +313,20 @@ def test_verify_downgrades_true_or_partly_without_kept_source_to_unverified(monk
     assert r["why"] == "인용된 출처가 없어 확인 불가로 내렸습니다."
 
 
-def test_verify_false_stays_false_without_sources(monkeypatch):
+@pytest.mark.parametrize("public_event,status", [(True, "stop"), (False, "warn")])
+@pytest.mark.parametrize("sources", [[], ["https://made-up.example.com/x"]])
+def test_verify_false_without_cited_sources_downgrades_and_preserves_public_event(
+    monkeypatch, public_event, status, sources,
+):
     use_or_key(monkeypatch)
-    results = [{"id": "C1", "verdict": "false", "why": "보도와 다름", "fact": "그건 아님", "sources": []}]
+    results = [{"id": "C1", "verdict": "false", "public_event": public_event,
+                "why": "보도와 다름", "fact": "그건 아님", "sources": sources}]
     fake_post(monkeypatch, verdict_answer(results, chunks=[]))
     r = F.verify([VCLAIM])["results"][0]
-    assert r["verdict"] == "false" and r["fact"] == "그건 아님"
+    assert r["verdict"] == "unverified" and r["public_event"] is public_event
+    assert r["fact"] is None and r["sources"] == []
+    assert "인용된 출처가 없어 확인 불가로 내렸습니다." in r["why"]
+    assert F.overall_status([r]) == status
 
 
 def test_verify_false_fact_survives_record_but_is_not_a_topic_fact(monkeypatch, tmp_path):
@@ -349,7 +357,8 @@ def test_verify_false_fact_survives_record_but_is_not_a_topic_fact(monkeypatch, 
 @pytest.mark.parametrize("fact", [None, "", "   "])
 def test_verify_false_empty_fact_stays_none(monkeypatch, fact):
     use_or_key(monkeypatch)
-    fake_post(monkeypatch, verdict_answer([res("C1", "false", fact=fact)], chunks=[]))
+    fake_post(monkeypatch, verdict_answer([res("C1", "false", fact=fact, sources=[URL_A])],
+                                        chunks=[web(URL_A, "기사")]))
     r = F.verify([VCLAIM])["results"][0]
     assert r["verdict"] == "false" and r["fact"] is None
 
@@ -378,7 +387,7 @@ def test_verify_public_event_boolean_and_why_prefix(monkeypatch, event_fields, e
     assert F.overall_status([r]) == ("stop" if expected else "warn")
 
 
-@pytest.mark.parametrize("verdict", ["true", "partly"])
+@pytest.mark.parametrize("verdict", ["true", "partly", "false"])
 def test_verify_public_event_without_cited_source_downgrades_and_stops(monkeypatch, verdict):
     use_or_key(monkeypatch)
     result = {**res("C1", verdict, why="모델의 설명", fact="검증되지 않은 내용",
