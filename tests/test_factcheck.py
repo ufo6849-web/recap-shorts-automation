@@ -703,6 +703,22 @@ def test_description_notice_pass_lists_each_source_once():
                                                     "연합뉴스 · 연합 기사 · " + URL_B])
 
 
+@pytest.mark.parametrize("claims", [
+    [],
+    [claim("C1", "true", sources=[])],
+    [{**claim("C1", "true", sources=[SRC_A]), "origin": "ad"}],
+])
+def test_description_notice_pass_without_sources_uses_neutral_note(claims):
+    rec = mk_record("pass", claims=claims)
+    assert F.description_notice(rec) == ("주요 주장을 뉴스와 대조해 확인했습니다.", [])
+
+
+@pytest.mark.parametrize("status", ["warn", "stop", "failed"])
+def test_description_notice_without_sources_keeps_caution(status):
+    rec = mk_record(status, claims=[{**claim("C1", "partly", sources=[SRC_A]), "origin": "ad"}])
+    assert F.description_notice(rec) == (CAUTION_NOTE, [])
+
+
 @pytest.mark.parametrize("status", ["warn", "stop", "failed"])
 def test_description_notice_caution_for_warn_and_overridden_records(status):
     rec = mk_record(status, claims=[claim("C1", "partly", fact="f", sources=[SRC_A]), claim("C2", "false")])

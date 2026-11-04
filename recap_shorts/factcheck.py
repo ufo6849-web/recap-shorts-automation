@@ -42,6 +42,7 @@ FIELDS = ("title", "hook", "sentence", "closing")
 NO_OR_KEY = "사실 확인에는 OpenRouter 키가 필요합니다. 설정에서 넣어 주세요."
 DEFAULT_NOTE = "내용은 위 커뮤니티 게시글 기준이며 공식 기록과 대조하지 않았습니다."
 PASS_NOTE = "아래 뉴스로 주요 주장을 확인했습니다."
+PASS_NO_SOURCES_NOTE = "주요 주장을 뉴스와 대조해 확인했습니다."
 CAUTION_NOTE = "일부 주장은 보도로 확인되지 않았습니다."
 # 정보 낱말만으로 승격한 글은 원문 인용이 없으면 일반 글로 돌아갈 수 있다.
 INFORMATION_SIGNALS = re.compile(
@@ -547,7 +548,6 @@ def description_notice(record: dict | None) -> tuple[str, list[str]]:
     """설명 문구의 고지 한 문장과 [뉴스 출처] 줄들. 통과·주의·직접 확인에 따라 문구가 다르다(10절 10)."""
     if not record or record.get("status") in (None, "skipped"):
         return DEFAULT_NOTE, []
-    note = PASS_NOTE if record.get("status") == "pass" else CAUTION_NOTE
     lines, seen = [], set()
     for c in record.get("claims") or []:
         if c.get("origin") == "ad" or c.get("verdict") not in ("true", "partly"):
@@ -557,6 +557,9 @@ def description_notice(record: dict | None) -> tuple[str, list[str]]:
                 continue
             seen.add(s["url"])
             lines.append(" · ".join(x for x in (s.get("outlet"), s.get("title"), s["url"]) if x))
+    note = CAUTION_NOTE
+    if record.get("status") == "pass":
+        note = PASS_NOTE if lines else PASS_NO_SOURCES_NOTE
     return note, lines
 
 
