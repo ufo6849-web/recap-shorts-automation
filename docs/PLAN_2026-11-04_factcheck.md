@@ -228,3 +228,165 @@
 11. **API:** `POST /api/jobs/{id}/factcheck`, `POST .../factcheck/override {note}`, `POST .../factcheck/ack`에 `local_only`를 붙인다.
 12. **화면:** 주의 상태의 진행 단추는 "확인하고 계속"이다. 다시 확인이 필요한 상태(글 고침, 파일 없음)는 "글이 바뀌어 다시 확인해야 합니다"와 "다시 확인" 단추로 보여 준다.
 13. **시험:** 상태(skipped·pass·warn·stop·failed·stale·missing) × 입구(auto·continue·rerun·render·capcut) 표로 매개변수 시험을 만든다. 카드 1080×810 렌더 프레임 시험도 둔다.
+
+## 11. 구현 계약 (작업자 공용, 2026-11-04 20:05)
+
+작업자는 넷이다. 파일 소유를 겹치지 않게 나눈다. 다른 작업자의 파일은 읽기만 한다.
+
+| 작업자 | 소유 파일 |
+|---|---|
+| W1 핵심 | `recap_shorts/factcheck.py`(새), `recap_shorts/llm/gemini_api.py`, `tests/test_factcheck.py`(새) |
+| W4 연결 | `recap_shorts/pipeline.py`, `recap_shorts/app/server.py`, `tests/pipeline/fakes.py`, `tests/pipeline/test_factcheck_flow.py`(새), `README.md` |
+| W3 카드·배치·가드 | `recap_shorts/collect/news_card.py`, `recap_shorts/images/arrange.py`, `recap_shorts/images/sensitive.py`, `recap_shorts/script/guard.py`, `recap_shorts/script/prompt.py`, `tests/test_factcheck_render.py`(새), 이 파일들의 기존 시험 |
+| W2 화면 | `web/src/types.ts`, `web/src/api.ts`, `web/src/pages/Job.tsx`, `web/src/pages/Review.tsx`, `web/src/pages/SceneEditor.tsx`, `web/src/mock/index.ts` |
+
+### 11.1 `recap_shorts/factcheck.py` (W1이 만들고 W4가 부른다)
+
+```python
+POLICY_VERSION = 1
+CLASSIFY_MODEL = "gemini-3.8-flash"          # route()가 Gemini 키 또는 OpenRouter로 보낸다
+VERIFY_MODEL = "anthropic/claude-opus-5.5"   # OpenRouter 전용
+class FactcheckError(RuntimeError): ...      # str(e)는 화면에 그대로 보일 한국어 문장
+
+def input_hash(title: str, source_text: str) -> str                 # sha256(title + "\n" + source_text) hex
+def classify(title: str, source_text: str, *, force: bool = False) -> dict
+    # -> {"kind": "info"|"general"|"uncertain", "reason": str,
+    #     "claims": [{"id": "C1", "claim": str, "query": str, "source_quote": str}]}  최대 3개
+    # source_quote 가 source_text 에 (normalize_loose 기준) 없으면 그 주장을 버린다. force=True 면 일반 글이어도 주장을 뽑는다.
+    # timeout 30초. 실패하면 FactcheckError.
+def verify(claims: list[dict]) -> dict
+    # OpenRouter 키가 없으면 FactcheckError("사실 확인에는 OpenRouter 키가 필요합니다. 설정에서 넣어 주세요.")
+    # body 에 tools=[{"google_search": {}}] 를 넣어 _post(VERIFY_MODEL, body, timeout=120) 로 부른다.
+    # -> {"results": [{"id","verdict": "true"|"partly"|"false"|"unverified","why": str,"fact": str|None,
+    #                  "sources": [{"url","title","outlet","date": "YYYY-MM-DD"|None}]}],
+    #     "overall_why": str, "model": VERIFY_MODEL, "search": "exa:5", "cost_usd": float|None}
+    # 출처: 응답 groundingMetadata 의 인용 URL 에 있는 것만 남긴다(정규화 후 비교). 제목은 인용 메타데이터의 title.
+    # 날짜는 date_from_url 만. outlet 은 collect.news_api.outlet_for. true/partly 인데 출처가 0개면 unverified 로 내린다.
+def overall_status(results: list[dict]) -> str        # false 있으면 "stop", unverified/partly 있으면 "warn", 모두 true 면 "pass"
+def build_record(title, source_text, cls: dict | None, ver: dict | None, *, error: str | None = None, forced: bool = False) -> dict
+    # factcheck.json 내용(11.3). cls.kind == "general" 이고 forced 가 아니면 status "skipped". error 가 있으면 "failed".
+def topic_additions(record: dict) -> dict
+    # {"facts": [{"id":"F1","text":fact,"evidence":fact,"source":url,"claim_id":"C1"}],      # true·partly 이고 출처 있음
+    #  "false_claims": [{"id":"C2","claim":str,"source_quote":str}],                          # false
+    #  "unverified_claims": [{"id":"C3","claim":str}]}                                        # unverified
+def gate(record: dict | None, title: str, source_text: str, policy: int | None) -> tuple[str, str | None]
+    # policy is None(기능 이전 작업) -> ("clear", None)
+    # record None / version 다름 -> ("blocked", "사실 확인 결과가 없습니다. 다시 확인해 주세요.")
+    # input_hash 다름 -> ("blocked", "글이 바뀌어 사실 확인을 다시 해야 합니다.")
+    # skipped, pass -> clear
+    # warn -> ack.input_hash 가 맞으면 clear, 아니면 ("need_ack", "주의 판정을 확인하고 계속해 주세요.")
+    # stop -> override.input_hash 가 맞으면 clear, 아니면 ("blocked", "사실 아님 판정이 있어 계속할 수 없습니다. 고치거나 직접 확인해 주세요.")
+    # failed -> override 가 맞으면 clear, 아니면 ("blocked", record["error"] 또는 "사실 확인에 실패했습니다. 다시 확인해 주세요.")
+def script_check(script: dict, record: dict) -> list[dict]
+    # false·unverified 주장이 없으면 [] (호출 안 함). 있으면 CLASSIFY_MODEL 로 한 번 묻는다(timeout 30초).
+    # -> [{"field": "title"|"hook"|"sentence"|"closing", "index": int|None, "claim_id": str, "verdict": "false"|"unverified", "text": str}]
+def description_notice(record: dict | None) -> tuple[str, list[str]]
+    # (고지 한 문장, ["언론사 · 제목 · URL", ...]) — 고지는 10절 10번 문구. record None/skipped 면 기존 문구
+    # "내용은 위 커뮤니티 게시글 기준이며 공식 기록과 대조하지 않았습니다."
+def save_record(job_dir: Path, record: dict) -> None    # 임시 파일 + os.replace
+def load_record(job_dir: Path) -> dict | None            # 없음·깨짐·version 다름이면 None
+def safe_url(url: str) -> str | None                     # http(s)만, 사용자 정보 없음, 사설·localhost 호스트 아님, 500자 이하, fragment 제거
+def date_from_url(url: str) -> str | None                # /2026/11/02/ 또는 20261102 꼴 -> "2026-11-02", 아니면 None
+```
+
+`gemini_api.py`(W1)에서 할 일은 다음과 같다.
+- `_or_request`는 body의 `tools`에 `google_search`가 있으면 `plugins: [{"id": "web", "engine": "exa", "max_results": 5}]`로 바꾼다.
+- `_gemini_shape`는 응답의 `message.annotations[].url_citation{url,title}`을 `candidates[0].groundingMetadata.groundingChunks[].web{uri,title}`로 옮긴다. OpenRouter `usage.cost`는 `usageMetadata.costUsd`로 옮긴다.
+- 사용량 기록은 지금처럼 어댑터만 한다.
+- Gemini 직통 경로에서 `tools`는 그대로 보낸다. 1차에서는 `verify`가 OpenRouter만 쓰므로 실제로 쓰이지 않는다.
+
+### 11.2 `topic.json` 추가 키 (W4가 쓰고 W3가 읽는다)
+
+- `facts`, `false_claims`, `unverified_claims`: 모양은 `topic_additions`와 같다.
+- 다시 확인할 때마다 세 키를 통째로 바꾼다.
+
+### 11.3 `work/<job>/factcheck.json` (W1 모양, W4가 저장)
+
+```json
+{"version": 1, "input_hash": "…", "status": "skipped|pass|warn|stop|failed", "kind": "info|general|uncertain|null",
+ "forced": false, "reason": "…", "claims": [{"id": "C1", "claim": "…", "source_quote": "…", "verdict": "true|partly|false|unverified",
+ "why": "…", "fact": "…|null", "sources": [{"url": "…", "title": "…", "outlet": "…", "date": "YYYY-MM-DD|null"}]}],
+ "overall_why": "…", "error": "…|null", "override": null, "ack": null,
+ "model": "…", "search": "exa:5", "cost_usd": 0.07, "checked_at": "ISO8601"}
+```
+
+`override`는 `{"at", "note", "input_hash"}`이고, `ack`는 `{"at", "input_hash"}`이다.
+
+### 11.4 파이프라인 (W4)
+
+- **`step_read`:** `topic.json`을 쓴 뒤 하위 단계 "사실 확인"을 돈다.
+  - `classify`를 부르고, 정보성이면 `verify`를 부른다. `FactcheckError`면 record를 `failed`로 만든다.
+  - 그다음 `save_record`로 저장하고, `topic_additions`를 `topic.json`에 넣는다.
+  - `job.state["factcheck_policy"] = POLICY_VERSION`을 저장한다.
+  - 사실 확인이 실패해도 읽기 단계는 오류로 끝나지 않는다. `failed` 판정으로 멈춘다.
+- **외부 호출:** `Deps`에 `factcheck_classify`, `factcheck_verify`, `factcheck_script_check`를 더하고, `FakeDeps`에 가짜를 넣는다.
+- **Runner:** `read`가 끝나면 `gate`를 부르고, `clear`가 아니면 `auto_steps`여도 `waiting`으로 멈춘다(`pipeline.py:1543` 앞).
+  - `script`가 끝나면 `script_check.json`의 `factcheck_flags`가 비어 있지 않을 때 `waiting`으로 멈춘다.
+- **`continue_job`:** 첫 waiting이 `read`일 때 gate가 `blocked`면 `FactcheckBlocked(reason)`을 낸다. `need_ack`면 record에 `ack`를 저장하고 진행한다.
+- **`step_script`:** `generate_script` 뒤에 `deps.factcheck_script_check`를 부른다.
+  - 결과는 `script_check.json`의 `factcheck_flags`에 넣고, 같은 내용을 `flags`에 "사실 확인: …" 한국어 문장으로 더한다.
+  - field가 `sentence`이고 verdict가 `false`면 그 문장을 지우고 `deleted`에 남긴다.
+- **다시 확인:** `recheck_factcheck(runner, job, force)`는 `runner.submit(job, fn=...)`으로 대기열에 넣고, 실행 중이면 `Busy`다.
+  - 대본 이후가 끝났으면 `reset_from("script")`로 되돌린다. 끝나면 `read`를 `waiting`으로 둔다.
+  - 이전 뉴스 카드 파일과 assets 항목을 지운다.
+- **뉴스 카드:** `step_assets`에서 `topic["facts"]`의 출처로 카드를 그린다(`news_card.draw_card`, 출처 기사마다 1장, 최대 2장).
+  - 파일은 `assets/news/card_01.png`이다.
+  - assets 항목은 `{"file", "kind": "cap", "role": "news", "status": "ok", "fact_id", "fact_text", "source_url", "outlet", "title", "date"}`이다.
+- **`sentence_infos`:** 본문 문장의 `evidence`를 `"evidence"` 키로 싣는다.
+- **`make_description`:** `description_notice(record)`로 고지와 `[뉴스 출처]` 줄을 넣는다.
+
+### 11.5 서버 (W4)
+
+- **`view(job)`:** 두 키를 더한다.
+  - `"factcheck_policy": int|null`
+  - `"factcheck"`: null이거나 record에서 `input_hash`를 뺀 값에 아래 키를 더한 것이다.
+    - `"stale": bool`
+    - `"gate": "clear"|"need_ack"|"blocked"`
+    - `"gate_reason": str|null`
+    - `"running": bool`
+  - 정책 작업인데 record가 없고 read가 끝났으면 `{"status": "missing", "claims": [], "gate": "blocked", "gate_reason": …}`를 싣는다.
+- **`POST /api/jobs/{id}/factcheck` `{"force": bool}`:** `local_only`다. read가 끝나지 않았거나 실행 중이면 409이고, 성공하면 view를 돌려준다.
+- **`POST /api/jobs/{id}/factcheck/override` `{"note": "1~500자"}`:** `local_only`다. status가 `stop`·`failed`이고 stale이 아닐 때만 받고, 아니면 400이다.
+- **`/continue`:** `FactcheckBlocked`를 409(사유 그대로)로 바꾼다.
+- **`/rerun`, `/render`, `/capcut`:** `gate`가 `blocked`면 409다. 기능 이전 작업은 허용한다.
+
+### 11.6 카드·배치·가드 (W3)
+
+- **`news_card.draw_card(title: str, outlet: str, date: str | None, out: Path) -> Path`:** 1080×810 PNG다. 모양은 시안 `news_card_1080x810.png`을 따른다.
+  - 어두운 세로 그라데이션 바탕 가운데 흰 둥근 카드(980×640)를 둔다.
+  - 카드에는 노란 "뉴스" 칩, 언론사, "· 날짜"(있을 때만), 제목 최대 3줄(넘치면 …), 구분선, 왼쪽 초록 "사실 확인 근거 기사", 오른쪽 회색 "원문 링크는 설명란에"를 넣는다.
+  - 글꼴은 `render.layout`의 Pretendard다. 글꼴에 없는 글자는 빼거나 비슷한 글자로 바꾼다(〇→○ 등).
+  - 기존 CLI(`collect/__main__.py`)가 쓰는 `draw_news_card`, `fmt_date`, `FontNotFound`는 계속 동작해야 한다.
+- **`arrange`:**
+  - `kind_of`는 role이 `news`면 `"news"`를 돌려준다.
+  - `heuristic_scores`에서 news 그림은 문장 `evidence`와 그림 `fact_text`가 `normalize_loose` 기준으로 같거나 한쪽이 다른 쪽을 품으면 0.95, 아니면 0.0이다.
+  - `off_script`는 news를 빼지 않는다. `assign`·`plan_with_ai_cap`은 news를 cap처럼 센다.
+- **`sensitive`:** role이 `news`면 검사하지 않는다.
+- **`guard.run_guard`:** 본문 문장의 evidence가 `topic["false_claims"][].source_quote`와 겹치면(정규화 후 6자 이상이 한쪽이 다른 쪽에 들어감) 그 문장을 지운다. 지운 사실은 `deleted`에 남기고, `flags`에 "사실 확인: 사실 아님 주장(C2)과 같은 근거라 문장 n 삭제"를 더한다.
+- **`prompt.build_prompt`:** facts·false_claims·unverified_claims가 있으면 블록과 규칙을 더한다.
+  - 원문과 facts가 다르면 facts를 따른다.
+  - false_claims의 주장은 사실처럼 말하지 않는다.
+  - unverified_claims의 수치·주장은 쓰지 않는다.
+
+### 11.7 화면 (W2)
+
+- **타입:** `JobState`에 `factcheck_policy?: number | null`과 `factcheck?: FactcheckView | null`을 더한다. `AssetEntry`에 `role?`, `fact_id?`, `outlet?`, `title?`, `source_url?`, `date?`를 더한다.
+- **`api.ts`:** `factcheck(id, force)`, `factcheckOverride(id, note)`를 더한다.
+- **`Job.tsx`:**
+  - 읽기 단계이고 `job.factcheck`가 있으면 NowCard 아래 TopicCard 위에 FactCheckCard를 둔다. 모양은 시안을 따른다.
+  - 판정 칩은 고정 폭 60px이다. 출처는 링크(`target=_blank rel=noopener`)다.
+  - "다시 확인"과 "그래도 확인하기"는 `api.factcheck`를 부른다.
+  - "직접 확인했음"은 인라인 메모 칸(모달 금지)이고, 메모가 비면 단추를 끈다.
+  - NowCard의 읽기 waiting은 gate에 따라 바뀐다.
+    - `blocked`: gate_reason을 보여 주고 진행 단추를 끈다.
+    - `need_ack`: 단추 이름을 "확인하고 계속"으로 바꾼다.
+  - `running`이면 "확인 중" 표시를 하고 단추를 끈다.
+  - `stale`·`missing`이면 "글이 바뀌어 다시 확인해야 합니다"와 "다시 확인" 단추를 보여 준다.
+  - 비용은 `cost_usd`가 있을 때만 쓴다.
+- **`Review.tsx` `warnRows`:** 세 경우에 경고 줄을 더한다.
+  - warn을 확인하고 넘김: "사실 확인: 일부 주장이 보도로 확인되지 않았습니다"
+  - override: "사실 확인: 직접 확인으로 넘김 — {note}"
+  - `factcheck_policy`가 없고 read가 끝난 작업: "사실 확인 없이 만든 이전 작업"
+- **`SceneEditor.tsx`:** role이 `news`면 칩을 "뉴스"로 하고 가리기 단추를 숨긴다.
+- **`mock/index.ts`:** 세 상태(stop·warn·skipped) 예시 작업을 넣어 `?mock=1`에서 볼 수 있게 한다.
+- 문구와 색은 시안(`ui_*.png`)과 같게 한다. 앱 토큰(`index.css`)만 쓴다.
