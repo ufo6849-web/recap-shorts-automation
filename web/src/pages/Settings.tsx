@@ -559,12 +559,13 @@ export default function SettingsPage() {
       setCatBusy(false);
     }
   }
-  // 처음 한 번, 그리고 Gemini 키를 넣거나 지우면 다시(이 키로 쓸 수 있는 모델 목록이 바뀐다)
-  const ready = data ? data.ready : null;
+  // 처음 한 번, 그리고 Gemini 키를 넣거나 지우면 다시(이 키로 쓸 수 있는 모델 목록이 바뀐다). OpenRouter 키만 바뀌면 다시 받지 않는다.
+  const geminiKey = data?.keys.find((k) => k.name === "gemini_api_key");
+  const geminiKeyState = geminiKey ? `${geminiKey.set}/${geminiKey.source ?? ""}` : null;
   useEffect(() => {
-    if (ready !== null) loadCatalog();
+    if (geminiKeyState !== null) loadCatalog();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready]);
+  }, [geminiKeyState]);
 
   /** '쓸 모델' 저장 — 고르면 바로. */
   async function saveUse(p: SettingsPatch) {
@@ -585,7 +586,7 @@ export default function SettingsPage() {
 
   const applyModels = (v: ModelsView) => setData((d) => (d ? { ...d, models: v.models, setup_cmd: v.setup_cmd } : d));
 
-  // 받는 중인 모델이 있으면 1초마다 진행 상황을 다시 읽는다. 다 끝나면 TopBar 상태 점(받아쓰기 모델)도 다시 본다.
+  // 받는 중인 모델이 있으면 1초마다 진행 상황을 다시 읽는다. 다 끝나면 설정 전체를 다시 읽어 준비 상태(ready·ready_reason)와 TopBar 상태 점도 맞춘다.
   const modelsBusy = !!data?.models.some(modelBusy);
   useEffect(() => {
     if (!modelsBusy) return;
@@ -593,7 +594,7 @@ export default function SettingsPage() {
       try {
         const v = await api.models();
         applyModels(v);
-        if (!v.models.some(modelBusy)) window.dispatchEvent(new Event("recap:health"));
+        if (!v.models.some(modelBusy)) apply(await api.settings());     // 설치가 끝났다 — 로컬 목소리 준비 여부가 바뀔 수 있다
       } catch { /* 다음 주기에 다시 */ }
     }, 1000);
     return () => window.clearInterval(t);

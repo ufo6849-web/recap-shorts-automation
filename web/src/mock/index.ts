@@ -32,11 +32,12 @@ const MODELS: ModelFile[] = [
   { id: "supertonic", label: "로컬 목소리(Supertonic)", ok: false, size_mb: 129, dir: "models/sherpa-onnx-supertonic-3-tts-int8-2026-05-11",
     missing_effect: "없으면 로컬 목소리 엔진만 못 씁니다(기본은 Gemini 목소리)", env: false, job: null },
 ];
+/** 고른 적 없는 엔진은 ""(빈 값). 화면에 나가는 값은 키에 따라 정해진다(effImage·effVoice — 서버와 같음). */
 const settingsState: { keys: Record<string, string>; image_engine: string; models: Record<string, string>; voice: { engine: string; gemini_voice: string; sid: number }; sfx: { fill_missing: boolean } } = {
   keys: { gemini_api_key: "", openrouter_api_key: "", cf_account_id: "", cf_api_token: "" },
-  image_engine: "gemini",
+  image_engine: "",
   models: {},
-  voice: { engine: "gemini", gemini_voice: "Charon", sid: 0 },
+  voice: { engine: "", gemini_voice: "Charon", sid: 0 },
   sfx: { fill_missing: true },
 };
 const ROLE_DEFS: [ModelRole["role"], string, string, string][] = [
@@ -79,14 +80,38 @@ function mockInstall(id: string) {
 }
 const modelsView = () => ({ models: MODELS.map((m) => ({ ...m, job: m.job ? { ...m.job } : null })), setup_cmd: mockSetupCmd() });
 const maskedOf = (v: string) => (!v ? null : v.length >= 16 ? `••••${v.slice(-4)}` : "••••");
-/** 서버의 readiness() 흉내: AI 키(Gemini 또는 OpenRouter)가 하나라도 있으면 준비, 없으면 이유 한 줄. */
+const hasKey = (name: "gemini_api_key" | "openrouter_api_key") => !!settingsState.keys[name];
+/** 서버 image_engine(): 고른 값이 있으면 그 값, 없으면 Gemini 키가 있을 때 gemini, 없을 때 off. */
+const effImage = (): string => (ENGINES.some((e) => e.id === settingsState.image_engine) ? settingsState.image_engine : hasKey("gemini_api_key") ? "gemini" : "off");
+/** 서버 voice_engine(): 고른 값이 있으면 그 값, 없으면 Gemini 키가 있을 때 gemini, 없을 때 supertonic. */
+const effVoice = (): string => (["gemini", "supertonic"].includes(settingsState.voice.engine) ? settingsState.voice.engine : hasKey("gemini_api_key") ? "gemini" : "supertonic");
 const NEED_KEY = "Gemini 또는 OpenRouter API 키가 필요합니다";
-const readyReason = (): string | null => (settingsState.keys.gemini_api_key || settingsState.keys.openrouter_api_key ? null : NEED_KEY);
-/** health 의 gemini_key 자리: 준비되면 쓰는 키, 아니면 이유. */
-const keyDetail = (): string => {
-  const { gemini_api_key: g, openrouter_api_key: o } = settingsState.keys;
-  return g && o ? "Gemini·OpenRouter 키 있음" : g ? "Gemini 키로 부름" : o ? "OpenRouter 키로 부름(Gemini 키 없음)" : NEED_KEY;
+/** gemini_api.route() 와 같은 표: vendor/name 은 OpenRouter 로만, 그 밖의 이름은 Gemini 키가 있으면 Gemini, 없으면 OpenRouter. 갈 곳이 없으면 null. */
+const routeOf = (model: string): "gemini" | "openrouter" | null => {
+  if (model.includes("/")) return hasKey("openrouter_api_key") ? "openrouter" : null;
+  return hasKey("gemini_api_key") ? "gemini" : hasKey("openrouter_api_key") ? "openrouter" : null;
 };
+/** 서버 readiness() 흉내: 대본 → 그림 읽기 → 목소리 → 목소리 모델 파일 순으로 처음 걸린 한 줄(문구는 settings.py 그대로). via 는 화면 표시용. */
+function readiness(): { reason: string | null; via: string | null } {
+  const script = settingsState.models.script || "gemini-4-argon";
+  const via = new Set<string>();
+  let reason: string | null = null;
+  const rs = routeOf(script);
+  if (rs) via.add(rs);
+  else reason = script.includes("/") ? `대본 모델(${script})은 OpenRouter 키가 필요합니다` : NEED_KEY;
+  const rv = routeOf("gemini-3.8-flash");          // 그림 읽기·가림 판단(VISION_MODEL)
+  if (rv) via.add(rv);
+  else reason = reason ?? NEED_KEY;
+  const voice = effVoice();
+  if (voice === "gemini" && hasKey("gemini_api_key")) via.add("gemini");
+  if (reason === null && voice === "gemini" && !hasKey("gemini_api_key")) reason = "목소리가 Gemini 인데 Gemini 키가 없습니다 — 설정에서 로컬 목소리를 고르세요";
+  if (reason === null && voice === "supertonic" && !MODELS.find((m) => m.id === "supertonic")?.ok) reason = "로컬 목소리(Supertonic) 모델이 없습니다 — 설정 → 모델 파일에서 먼저 받으세요";
+  return { reason, via: via.size === 0 ? null : via.size > 1 ? "mixed" : [...via][0] };
+}
+const readyReason = (): string | null => readiness().reason;
+const HEALTH_VIA: Record<string, string> = { gemini: "Gemini 키로 부름", openrouter: "OpenRouter 키로 부름(Gemini 키 없음)", mixed: "Gemini·OpenRouter 키 있음" };
+/** health 의 gemini_key 자리: 준비가 안 되면 이유, 준비되면 쓰는 키(서버 HEALTH_VIA 와 같다). */
+const keyDetail = (): string => { const r = readiness(); return r.reason ?? (r.via ? HEALTH_VIA[r.via] : "준비됨"); };
 function settingsView(): Settings {
   mockSettle();
   const keys: SettingsKey[] = KEY_DEFS.map(([name, label, group, required, env]) => {
@@ -97,11 +122,11 @@ function settingsView(): Settings {
     file: "config/settings.local.json",
     ready: readyReason() === null, ready_reason: readyReason(),
     keys, groups: GROUP_DEFS,
-    image_engine: settingsState.image_engine,
+    image_engine: effImage(),
     image_engines: ENGINES,
     model_roles: ROLE_DEFS.map(([role, label, env, def]) => ({ role, label, env, default: def, value: settingsState.models[role] || def,
       source: settingsState.models[role] ? "file" as const : null })),
-    voice: { ...settingsState.voice, engines: [{ id: "gemini", label: "Gemini 목소리" }, { id: "supertonic", label: "로컬 목소리 (Supertonic) — 이 컴퓨터에서 만듦, 무료" }],
+    voice: { ...settingsState.voice, engine: effVoice(), engines: [{ id: "gemini", label: "Gemini 목소리" }, { id: "supertonic", label: "로컬 목소리 (Supertonic) — 이 컴퓨터에서 만듦, 무료" }],
       gemini_voices: [["Charon", "정보 전달형"], ["Kore", "단단한"], ["Erinome", "또렷한"], ["Puck", "경쾌한"]].map(([id, d]) => ({ id, label: `${id} — ${d}` })),
       sid_env: false, sids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] },
     image_server: { url: "http://127.0.0.1:8791", up: false },
