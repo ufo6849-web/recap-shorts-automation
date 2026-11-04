@@ -1017,3 +1017,43 @@ def test_cancel_rejects_missing_or_other_run_without_state_change(env):
     finally:
         release.set()
         service.thread.join(5)
+
+
+# 실데이터의 마크다운 인용과 긴 쿼리를 포함한다. 외부 보관 파일 없이 재현한다.
+CITED_WHY = '부부가 아동 성범죄자들을 골라 살해했다는 보도는 찾지 못했습니다. 찾은 보도 중 부부가 저지른 살인은 반대로 계부와 친모가 성추행을 신고한 중학생 의붓딸을 살해해 징역 30년이 확정된 사건입니다([hani.co.kr](https://www.hani.co.kr/arti/society/society_general/960893.html)). 그 밖의 관련 보도도 피해 아동 쪽 사건이나 성범죄자 거주지 제한 입법예고 같은 제도 내용이었습니다([yna.co.kr](https://www.yna.co.kr/view/AKR20220915080800004), [moj.go.kr](https://www.moj.go.kr/moj/221/subview.do?enc=Zm5jdDF8QEB8JTJGYmJzJTJGbW9qJTJGMTgyJTJGNTc2NDI5JTJGYXJ0Y2xWaWV3LmRvJTNGcGFzc3dvcmQlM0QlMjZyZ3NCZ25kZVN0ciUzRCUyNmJic0NsU2VxJTNEJTI2cmdzRW5kZGVTdHIlM0QlMjZpc1ZpZXdNaW5lJTNEZmFsc2UlMjZwYWdlJTNEMSUyNmJic09wZW5XcmRTZXElM0QlMjZzcmNoQ29sdW1uJTNEJTI2c3JjaFdyZCUzRCUyNg%3D%3D)).'
+CLEAN_WHY = '부부가 아동 성범죄자들을 골라 살해했다는 보도는 찾지 못했습니다. 찾은 보도 중 부부가 저지른 살인은 반대로 계부와 친모가 성추행을 신고한 중학생 의붓딸을 살해해 징역 30년이 확정된 사건입니다. 그 밖의 관련 보도도 피해 아동 쪽 사건이나 성범죄자 거주지 제한 입법예고 같은 제도 내용이었습니다.'
+
+
+@pytest.mark.parametrize("source", ["dcbest", "blind"])
+@pytest.mark.parametrize("raw,expected", [
+    (CITED_WHY, CLEAN_WHY),
+    (CITED_WHY + "  https://example.com/report?enc=" + "Ab12%3D" * 100
+     + "  (http://example.com/source?a=1&b=2, https://example.org/other) () ( , ) ", CLEAN_WHY),
+    ("[관련 보도](https://example.com/report_(2026)?a=1&b=2)는  확인했습니다.\n"
+     "제도(입법예고 단계)와 수치(3.14)는 유지합니다. (hani.co.kr, yna.co.kr) ( , hani.co.kr, , yna.co.kr, )",
+     "관련 보도는 확인했습니다. 제도(입법예고 단계)와 수치(3.14)는 유지합니다."),
+    ("보도 https://example.com/report?a=1&b=2.  후속 설명", "보도. 후속 설명"),
+    (None, None),
+    ("", ""),
+])
+def test_annotate_and_status_clean_citations_without_rewriting_record(env, monkeypatch, source, raw, expected):
+    service, _ = env
+    run(service, service.estimate(source, rows()))
+    path = T._path(service.cache, source, 1)
+    rec = json.loads(path.read_text())
+    rec["why"] = raw
+    F.atomic_json(path, rec)
+    original = path.read_bytes()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("표시용 이유 정리는 분류·판정·저장·장부를 부르면 안 됨")
+
+    for name in ("llm", "verify", "_save", "_budget", "_reserve", "_settle"):
+        monkeypatch.setattr(service, name, forbidden)
+    items = rows()
+    service.annotate(source, items)
+    state = service.status()
+    assert items[0]["fc"]["why"] == expected
+    assert state["results"] == [{"no": 1, "fc": items[0]["fc"]}]
+    assert items[0]["fc"]["sources"] == rec["sources"]
+    assert path.read_bytes() == original

@@ -169,7 +169,7 @@ function Card({ t, busy, onMake, muted, topic }: { t: BestTopic; busy: boolean; 
   const alwaysWhy = chip?.color === "bad" || chip?.color === "warn";
   const reasonTone = chip?.color === "bad" ? "text-bad-text" : chip?.color === "warn" ? "text-warn-text" : "text-sub";
   return (
-    <div className="flex flex-col rounded-[14px] border border-line bg-surface p-4 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
+    <div className="flex min-w-0 flex-col rounded-[14px] border border-line bg-surface p-4 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
       <div className="flex flex-wrap items-center gap-1.5">
         {chip && <>
           <button type="button" className="rounded-lg whitespace-nowrap" aria-expanded={expanded} aria-controls={detailId}
@@ -188,7 +188,7 @@ function Card({ t, busy, onMake, muted, topic }: { t: BestTopic; busy: boolean; 
       <div className={cx("mt-2.5 line-clamp-2 min-h-[2.9em] text-[15px] font-semibold leading-snug", (muted || t.fit === 0 || dup) && "text-sub")}>{t.title}</div>
       <div className="mt-2 text-[13px] text-sub">조회 {fmtNum(t.views)} · 댓글 {fmtNum(t.comments)} · {ago(t.age_hours)}</div>
       {chip && <div id={detailId}>
-        {(alwaysWhy || expanded) && t.fc?.why && <div className={cx("mt-1 text-[13px] break-words", reasonTone)}>{t.fc.why}</div>}
+        {(alwaysWhy || expanded) && t.fc?.why && <div className={cx("mt-1 text-[13px] break-words", !expanded && "line-clamp-1", reasonTone)}>{t.fc.why}</div>}
         {expanded && <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-sub">
           {t.fc?.sources?.length ? t.fc.sources.map((s, i) => /^https?:\/\//i.test(s.url) && (
             <a key={`${s.url}-${i}`} href={s.url} target="_blank" rel="noreferrer" className="break-all underline underline-offset-2 hover:text-ink">{s.outlet || "출처"}{s.date && ` · ${s.date}`}</a>

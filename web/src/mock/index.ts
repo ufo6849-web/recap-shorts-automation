@@ -16,11 +16,14 @@ const topicFcCase = new URLSearchParams(location.search).get("topicfc") ?? "read
 const topicFcRecords = new Map<string, TopicFactcheck>();
 const topicFcKey = (source: string, no: string | number) => `${source}:${no}`;
 const topicFcGeneral = (): TopicFactcheck => ({ kind: "general", status: null, chip: null, why: null, sources: [], at: null, expired: false });
+// 긴 인용 예: "발표 내용이었습니다([example.com](https://example.com/topic-factcheck?ref=long-query))."
+// 실제 응답처럼 서버에서 링크·도메인 인용을 제거한 문장을 넣어 한 줄 표시와 펼침을 확인한다.
+const topicFcLongWhy = "[가상] 공공 지원금을 전면 폐지한다는 보도는 찾지 못했습니다. 확인한 보도는 일부 사업의 신청 기간과 지원 조건을 바꾼다는 발표 내용이었습니다. 기존 수급자에 대한 지원은 계속되며, 신규 신청자는 지역별 공고에서 대상과 접수 일정을 확인해야 합니다. 그 밖의 관련 보도도 예산 조정과 신청 절차 안내였으므로 모든 지원이 즉시 중단된다는 제목은 보도 내용과 다릅니다.";
 function topicFcVerdict(i: number): TopicFactcheck {
   const color = (["bad", "warn", "outline", "ok"] as const)[i % 4];
   return { kind: "news", status: ({ bad: "false", warn: "partly", outline: "unverified", ok: "true" } as const)[color],
     chip: { color, label: { bad: "가짜 의심", warn: "주의", outline: "확인 안 됨", ok: "보도 확인" }[color] },
-    why: { bad: "[가상] 보도와 다름 — 제목의 금액·주체가 보도 내용과 다릅니다.", warn: "[가상] 일부만 맞음 — 사건은 보도됐지만 제목 표현이 과장됐습니다.", outline: "[가상] 제목만으로는 사실을 확인할 보도를 찾지 못했습니다.", ok: "[가상] 제목의 핵심 내용이 보도와 일치합니다." }[color],
+    why: { bad: topicFcLongWhy, warn: "[가상] 일부만 맞음 — 사건은 보도됐지만 제목 표현이 과장됐습니다.", outline: "[가상] 제목만으로는 사실을 확인할 보도를 찾지 못했습니다.", ok: "[가상] 제목의 핵심 내용이 보도와 일치합니다." }[color],
     sources: color === "outline" ? [] : [{ url: "https://example.com/topic-factcheck", outlet: "예시 언론사", date: "2026-11-05" }],
     at: new Date().toISOString(), expired: false };
 }

@@ -181,6 +181,27 @@ def chip(rec: dict) -> dict | None:
     return {"label": label, "color": color}
 
 
+def _clean_why(why: str | None) -> str | None:
+    """출처는 별도 필드로 보여 주므로 이유의 링크·인용 찌꺼기만 제거한다."""
+    if not why:
+        return why
+    why = re.sub(r"\[([^\[\]]*)\]\(https?://[^\s()]+(?:\([^\s()]*\)[^\s()]*)*\)", r"\1", why)
+    why = re.sub(r"https?://[^\s<>()]+", lambda m: m[0][len(m[0].rstrip('.,;:!?')):], why)
+    domain = r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}"
+    why = re.sub(rf"\((?:{domain}|[\s,])*\)", "", why)
+    why = re.sub(r"\s+([.,;:!?])", r"\1", why)
+    return re.sub(r"\s+", " ", why).strip()
+
+
+def _fc_view(rec: dict, now: float) -> dict:
+    """보관 판정을 변경하지 않고 목록과 상태 응답에 같은 표시용 값을 만든다."""
+    fc = {k: rec.get(k) for k in ("kind", "status", "why", "sources", "at")}
+    fc["why"] = _clean_why(fc["why"])
+    stale = expired(rec, now)
+    fc.update(chip=None if stale else chip(rec), expired=stale)
+    return fc
+
+
 def build_prompt(titles: list[str]) -> str:
     return (
         "커뮤니티 제목을 분류한다. 실제 사건·정책·통계·건강 등 사실 확인할 내용은 news, "
@@ -329,6 +350,7 @@ class TopicFactcheck:
         self.lock = threading.RLock()
         self.estimate_lock = threading.Lock()
         self.snapshots: dict[str, dict] = {}
+        self._run_items = []
         self.thread = None
         self.cancelled = threading.Event()
         self.request_timed_out = False
@@ -438,9 +460,7 @@ class TopicFactcheck:
             rec = read_record(self.cache, source, item["no"], item["title"])
             item["fc"] = None
             if rec:
-                item["fc"] = {k: rec.get(k) for k in ("kind", "status", "why", "sources", "at")}
-                stale = expired(rec, self.clock())
-                item["fc"].update(chip=None if stale else chip(rec), expired=stale)
+                item["fc"] = _fc_view(rec, self.clock())
                 counts["news"] += rec["kind"] != "general"
                 counts["checked"] += checked(rec, self.clock())
                 counts["doubt"] += bool(checked(rec, self.clock()) and chip(rec) and chip(rec)["color"] == "bad")
@@ -538,14 +558,11 @@ class TopicFactcheck:
     def _results(self) -> list[dict]:
         """현재/마지막 실행의 보관 판정만 읽는다. 분류·판정·장부 조회는 하지 않는다."""
         results = []
-        for item in getattr(self, "_run_items", ()):
+        for item in self._run_items:
             rec = read_record(self.cache, self._state["source"], item["no"], item["title"])
             if not rec or rec.get("status") is None:
                 continue
-            fc = {k: rec.get(k) for k in ("kind", "status", "why", "sources", "at")}
-            stale = expired(rec, self.clock())
-            fc.update(chip=None if stale else chip(rec), expired=stale)
-            results.append({"no": item["no"], "fc": fc})
+            results.append({"no": item["no"], "fc": _fc_view(rec, self.clock())})
         return results
 
     def start(self, run_id: str) -> dict:
