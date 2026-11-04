@@ -223,6 +223,7 @@ def test_http_classification_budget_exhausted_returns_409_without_llm(app_env, s
     app, service, calls = app_env
     with TestClient(app, client=("127.0.0.1", 50000), base_url="http://localhost") as client:
         assert client.get("/api/topics", params={"source": "dcbest"}).status_code == 200
+        service.cache.mkdir(parents=True, exist_ok=True)
         F.atomic_json(service.cache / "_fc_budget.json", {service._day(): spent})
         response = client.post(PREFIX + "/estimate", json={"source": "dcbest", "nos": [1]})
         assert response.status_code == 409 and "하루" in response.json()["detail"]
