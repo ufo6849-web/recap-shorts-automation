@@ -156,12 +156,15 @@ def _or_request(or_model: str, body: dict) -> tuple[dict, dict]:
         req["reasoning"] = {"effort": level}
     if "temperature" in cfg and not or_model.startswith("anthropic/"):   # Claude 는 temperature 를 빼고 부른다
         req["temperature"] = cfg["temperature"]
+    if any(isinstance(t, dict) and "google_search" in t for t in (body.get("tools") or [])):
+        req["plugins"] = [{"id": "web", "engine": "exa", "max_results": 5}]   # 검색 도구 → OpenRouter 웹 플러그인(exa 5건)
     return req, seen
 
 
 def _gemini_shape(data: dict, or_model: str) -> dict:
     """OpenRouter 답 → Gemini 답 모양. 거절·빈 내용은 OpenRouter 오류로 낸다(Gemini 문구가 붙지 않게).
-    거절 문구의 blockReason=SAFETY 는 images/sensitive._is_block 이 알아보는 표식이다."""
+    거절 문구의 blockReason=SAFETY 는 images/sensitive._is_block 이 알아보는 표식이다.
+    검색 인용(annotations.url_citation)은 groundingMetadata 로, usage.cost 는 usageMetadata.costUsd 로 옮긴다."""
     ch = (data.get("choices") or [{}])[0] or {}
     msg = ch.get("message") or {}
     finish = ch.get("finish_reason")
@@ -174,7 +177,20 @@ def _gemini_shape(data: dict, or_model: str) -> dict:
         text = content if isinstance(content, str) else ""
     if not text.strip():
         raise GeminiApiError(f"OpenRouter 응답이 비어 있음(finishReason={finish})", provider="openrouter")
-    return {"candidates": [{"content": {"parts": [{"text": text}]}, "finishReason": finish}]}
+    cand: dict = {"content": {"parts": [{"text": text}]}, "finishReason": finish}
+    chunks = []                                  # 검색 인용(url_citation) → groundingMetadata.groundingChunks[].web
+    for a in msg.get("annotations") or []:
+        uc = a.get("url_citation") if isinstance(a, dict) else None
+        if isinstance(uc, dict) and uc.get("url"):
+            chunks.append({"web": {"uri": uc["url"], "title": str(uc.get("title") or "")}})
+    if chunks:
+        cand["groundingMetadata"] = {"groundingChunks": chunks}
+    out: dict = {"candidates": [cand]}
+    u = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    cost = u.get("cost")                         # usage.cost → usageMetadata.costUsd (기록은 _post_openrouter 가 이미 했다)
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+        out["usageMetadata"] = {"costUsd": cost}
+    return out
 
 
 def _log_openrouter(or_model: str, data: dict, seen: dict) -> None:
