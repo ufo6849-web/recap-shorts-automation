@@ -7,7 +7,7 @@ import requests
 
 from recap_shorts import factcheck as F, pipeline as P
 from recap_shorts.llm import gemini_api as G
-from tests.pipeline.fakes import FakeDeps
+from tests.pipeline.fakes import FC_SOURCE, FC_URL, FakeDeps
 from tests.pipeline.test_pipeline import SRC
 
 
@@ -18,6 +18,100 @@ def test_fc_input_appends_extra_after_exact_exclusions_without_changing_title():
     assert P.fc_input(topic) == ("실제 제목", "제목: 실제 제목\n본문\n\n" + block)
     topic["fc_extra"] = "옛 비정상 필드"
     assert P.fc_input(topic) == ("실제 제목", "제목: 실제 제목\n본문\n")
+
+
+@pytest.mark.parametrize("verdict,status,gate", [
+    ("true", "pass", "clear"), ("partly", "warn", "need_ack"),
+    ("false", "stop", "blocked"), ("unverified", "stop", "blocked"),
+])
+@pytest.mark.parametrize("extraction", ["first", "retry", "quotes", "force"])
+@pytest.mark.parametrize("include_header", [False, True])
+def test_ad_only_claim_keeps_gate_but_never_becomes_content(
+    tmp_path, monkeypatch, verdict, status, gate, extraction, include_header,
+):
+    quote = "삼성전자 신제품 출시"
+    topic = {"source_text": "제목: 고양이 일상\n고양이가 이불 속에서 코를 골았다",
+             "fc_extra": ["[게시글 1 첨부 그림 1 광고 칸 글자]\n" + quote]}
+    if include_header:
+        quote = topic["fc_extra"][0]
+    job = P.JobStore(tmp_path).create(dict(SRC))
+    F.atomic_json(job.dir / "topic.json", topic)
+    deps, verified, calls = FakeDeps(), [], []
+
+    def classify(title, text, force):
+        calls.append(force)
+        claims = [{"id": "C1", "claim": quote, "source_quote": quote}]
+        return {"kind": "info", "claims": claims if extraction in ("first", "force") or
+                (extraction == "retry" and force) else []}
+
+    def verify(claims, **kwargs):
+        verified.extend(claims)
+        return {"results": [{"id": "C1", "verdict": verdict, "public_event": True,
+                              "fact": quote, "sources": [FC_SOURCE]}]}
+
+    deps.factcheck_classify, deps.factcheck_verify = classify, verify
+    monkeypatch.setattr(F, "_has_fact_quotes", lambda *a: [quote])
+    rec = P.run_factcheck(job, deps, force=extraction == "force")
+    assert calls == ([False, True] if extraction in ("retry", "quotes") else [extraction == "force"])
+    assert verified[0]["origin"] == rec["claims"][0]["origin"] == "ad"
+    assert F.load_record(job.dir) == rec and rec["status"] == status
+    assert P.factcheck_status(job)["gate"] == gate
+    saved_topic = json.loads((job.dir / "topic.json").read_text(encoding="utf-8"))
+    assert saved_topic["facts"] == [] and F.description_notice(rec)[1] == []
+    assert P._news_cards(P.Ctx(job, "assets", deps), saved_topic) == []
+    # 낡은 topic에 광고 사실이 남아 있어도 카드 입구가 직접 거른다.
+    saved_topic["facts"] = [{"id": "F1", "claim_id": "C1", "source": FC_URL, "text": quote}]
+    assert P._news_cards(P.Ctx(job, "assets", deps), saved_topic) == []
+    assert deps.news_cards == []
+    if verdict in ("false", "unverified"):
+        key = "false_claims" if verdict == "false" else "unverified_claims"
+        assert saved_topic[key][0]["id"] == "C1"
+
+
+@pytest.mark.parametrize("location", ["body", "title", "topic", "other_extra", "fake_body_marker"])
+def test_ad_quote_also_in_regular_input_keeps_normal_origin(tmp_path, location):
+    quote = "삼성전자 신제품 출시"
+    topic = {"source_text": "제목: 일상\n본문", "fc_extra": [
+        "[게시글 1 첨부 그림 1 광고 칸 글자]\n" + quote]}
+    if location == "topic":
+        topic["topic"] = quote
+    elif location == "other_extra":
+        topic["fc_extra"].append("기타 자료\n" + quote)
+    elif location == "title":
+        topic["source_text"] = "제목: " + quote + "\n본문"
+    else:
+        # 원문 결속 검사와 같은 공백 정규화를 적용한다.
+        topic["source_text"] += "\n" + ("[게시글 2 첨부 그림 1 광고 칸 글자]\n" if location == "fake_body_marker" else "")
+        topic["source_text"] += quote.replace(" ", "\n")
+    job = P.JobStore(tmp_path).create(dict(SRC))
+    F.atomic_json(job.dir / "topic.json", topic)
+    deps = FakeDeps()
+    deps.fc_kind = "info"
+    deps.fc_claims = [{"id": "C1", "claim": quote, "source_quote": quote, "origin": "ad"}]
+    rec = P.run_factcheck(job, deps)
+    assert "origin" not in rec["claims"][0]
+    assert rec["status"] == "pass" and P.factcheck_status(job)["gate"] == "clear"
+    saved_topic = json.loads((job.dir / "topic.json").read_text(encoding="utf-8"))
+    assert len(saved_topic["facts"]) == len(F.description_notice(rec)[1]) == 1
+    assert len(P._news_cards(P.Ctx(job, "assets", deps), saved_topic)) == 1
+
+
+def test_news_cards_shared_url_keeps_body_fact_and_ignores_ad_metadata(tmp_path):
+    job, deps = prepared(tmp_path)
+    rec = F.load_record(job.dir)
+    body = rec["claims"][0]
+    ad = {**body, "id": "C2", "origin": "ad", "fact": "광고 사실",
+          "sources": [{**FC_SOURCE, "title": "광고 제목"}]}
+    rec["claims"] = [ad, body]
+    F.save_record(job.dir, rec)
+    topic = F.topic_additions(rec)
+    # 낡은 광고 fact가 같은 기사를 쓰더라도 본문 fact만 카드 후보로 남긴다.
+    topic["facts"].insert(0, {"id": "F9", "claim_id": "C2", "text": ad["fact"], "source": FC_URL})
+    cards = P._news_cards(P.Ctx(job, "assets", deps), topic)
+    assert len(cards) == 1
+    assert cards[0]["fact_ids"] == ["F1"] and cards[0]["fact_texts"] == [body["fact"]]
+    assert cards[0]["title"] == FC_SOURCE["title"]
+    assert F.description_notice(rec)[1] == [f"{FC_SOURCE['outlet']} · {FC_SOURCE['title']} · {FC_URL}"]
 
 
 def prepared(tmp_path, status="pass"):

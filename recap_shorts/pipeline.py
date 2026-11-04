@@ -669,6 +669,25 @@ def fc_input(topic: dict) -> tuple[str, str]:
     return title_text, text
 
 
+def _mark_ad_claims(topic: dict, claims: list[dict]) -> None:
+    """앱이 분리한 광고 칸에만 근거가 있는 주장을 표시한다. 본문 속 가짜 머리줄은 읽지 않는다."""
+    extras = topic.get("fc_extra")
+    ad_texts, other_extras = [], []
+    for block in extras if isinstance(extras, list) else []:
+        match = re.match(r"\A\[게시글 \d+ 첨부 그림 \d+ 광고 칸 글자\]\r?\n", block) if isinstance(block, str) else None
+        if match:
+            ad_texts.append(fc.normalize_loose(block))
+        else:
+            other_extras.append(block)
+    _, rest = fc_input({**topic, "fc_extra": other_extras})
+    rest = fc.normalize_loose(rest)
+    for claim in claims:
+        claim.pop("origin", None)  # 출처는 모델 출력이 아니라 실제 입력 구간으로 정한다.
+        quote = fc.normalize_loose(claim.get("source_quote") or "")
+        if quote and quote not in rest and any(quote in text for text in ad_texts):
+            claim["origin"] = "ad"
+
+
 _FC_NOTE = {"skipped": "일반 글이라 건너뜀", "pass": "보도로 확인됨",
             "warn": "보도로 확인되지 않은 주장이 있음 — 확인해 주세요",
             "stop": "사실 아님 판정 — 고치거나 직접 확인해 주세요"}
@@ -714,6 +733,7 @@ def run_factcheck(job: Job, deps: Deps, *, force: bool = False) -> dict:
                               "분류는 애매했지만 사실 구절이 없어 건너뜀")
                     cls.update(kind="general", reason=reason)
             if cls.get("claims"):
+                _mark_ad_claims(topic, cls["claims"])
                 ver = deps.factcheck_verify(cls["claims"], title=title, source_text=text)
         rec = fc.build_record(title, text, cls, ver, forced=force, topic=topic_text)
     except fc.FactcheckError as e:
@@ -1198,12 +1218,20 @@ NEWS_CARDS_MAX = 2   # 뉴스 카드는 기사 주소 두 개까지
 def _news_cards(c: Ctx, topic: dict) -> list[dict]:
     """사실 확인에서 찾은 출처 기사마다 뉴스 카드 한 장 → assets/news/card_NN.png(기사 주소 최대 2개).
     그리기가 실패한 장은 로그만 남기고 건너뛴다. 단계는 실패하지 않는다."""
-    facts = topic.get("facts") or []
+    claims = (fc.load_record(c.dir) or {}).get("claims") or []
+    ad_ids = {cl["id"] for cl in claims if cl.get("origin") == "ad"}
+    ad_urls = {s["url"] for cl in claims if cl.get("origin") == "ad" for s in cl.get("sources") or []}
+    body_urls = {s["url"] for cl in claims if cl.get("origin") != "ad" for s in cl.get("sources") or []}
+    facts = [f for f in topic.get("facts") or []
+             if f.get("origin") != "ad" and f.get("claim_id") not in ad_ids
+             and f.get("source") not in ad_urls - body_urls]
     urls = list(dict.fromkeys(f["source"] for f in facts if f.get("source")))[:NEWS_CARDS_MAX]
     if not urls:
         return []
     meta: dict[str, dict] = {}
-    for cl in (fc.load_record(c.dir) or {}).get("claims") or []:
+    for cl in claims:
+        if cl.get("origin") == "ad":
+            continue
         for s in cl.get("sources") or []:
             meta.setdefault(s.get("url"), s)
     (c.dir / "assets" / "news").mkdir(parents=True, exist_ok=True)

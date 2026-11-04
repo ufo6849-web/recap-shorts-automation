@@ -84,6 +84,17 @@ def use_or_key(monkeypatch, key=OR_KEY):
     monkeypatch.setattr(G, "_openrouter_key", lambda: key)
 
 
+@pytest.mark.parametrize("force", [False, True])
+def test_classify_normal_and_forced_share_ad_exclusion_rule(monkeypatch, force):
+    calls = fake_post(monkeypatch, gem({"kind": "info", "claims": [CLAIM1]}))
+    F.classify(TITLE, SRC, force=force)
+    prompt = calls[0]["body"]["contents"][0]["parts"][0]["text"]
+    rule = "광고 칸 글자 가운데 업체 이름·연락처·주소·URL·영업 홍보 문구는 제외하되, 정책·사건·통계·건강·인증·승인·제품 출시 같은 사실 주장은 포함한다."
+    assert rule in prompt.split("<untrusted_data>")[0]
+    assert rule in F._FACT_QUOTES_HEAD
+    assert (F._RULE_FORCE if force else F._RULE_NORMAL) in prompt
+
+
 def mk_record(status, claims=(), **extra):
     rec = {"version": F.POLICY_VERSION, "input_hash": H, "status": status, "kind": "info", "forced": False,
            "reason": "", "claims": list(claims), "overall_why": "", "error": None, "override": None, "ack": None,
@@ -660,6 +671,24 @@ def test_topic_additions_facts_false_and_unverified():
         {"id": "F2", "text": "바로잡은 문장", "evidence": "바로잡은 문장", "source": URL_B, "claim_id": "C2"}]
     assert out["false_claims"] == [{"id": "C3", "claim": "주장 C3", "source_quote": "근거 C3"}]
     assert out["unverified_claims"] == [{"id": "C4", "claim": "주장 C4"}]
+
+
+@pytest.mark.parametrize("verdict", ["true", "partly", "false", "unverified"])
+def test_ad_origin_survives_record_without_promoting_facts_or_sources(tmp_path, verdict):
+    cls = {"kind": "info", "claims": [{**VCLAIM, "origin": "ad"}, {**VCLAIM, "id": "C2"}]}
+    ver = ver_for([res("C1", verdict, fact="광고 사실", sources=[SRC_A, SRC_B]),
+                   res("C2", "true", fact="본문 사실", sources=[SRC_A])])
+    rec = F.build_record(TITLE, SRC, cls, ver)
+    F.save_record(tmp_path, rec)
+    rec = F.load_record(tmp_path)
+    assert rec["claims"][0]["origin"] == "ad"
+    assert "origin" not in rec["claims"][1]
+    additions = F.topic_additions(rec)
+    assert additions["facts"] == [{"id": "F1", "text": "본문 사실", "evidence": "본문 사실",
+                                    "source": URL_A, "claim_id": "C2"}]
+    assert bool(additions["false_claims"]) is (verdict == "false")
+    assert bool(additions["unverified_claims"]) is (verdict == "unverified")
+    assert F.description_notice(rec)[1] == ["조선일보 · 식약처 검토 기사 · " + URL_A]
 
 
 @pytest.mark.parametrize("record", [None, mk_record("skipped")])

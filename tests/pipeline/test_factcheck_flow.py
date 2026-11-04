@@ -263,6 +263,7 @@ def test_ad_banner_claim_reaches_verdict_or_promotion_skips(tmp_path, monkeypatc
     assert P.factcheck_status(job)["gate"] == ("blocked" if quote else "clear")
     if quote:
         assert rec["claims"][0]["source_quote"] == quote
+        assert rec["claims"][0]["origin"] == "ad"
         assert rec["claims"][0]["verdict"] == "false"
         assert len(prompts) == 4  # 분류·재추출·2차 판별·판정
     else:
@@ -286,6 +287,37 @@ def test_unexpected_error_in_check_is_recorded_and_read_completes(tmp_path):
     rec = F.load_record(job.dir)
     assert rec["status"] == "failed" and "사실 확인 중 오류" in rec["error"]
     assert (job.dir / P.ERRORS_LOG).is_file()
+
+
+def ad_pass_deps():
+    deps = deps_for("pass")
+    quote = "삼성전자 신제품 출시"
+    read_image = deps.read_image
+    deps.read_image = lambda images, instruction: (
+        read_image(images, instruction) if "댓글 목록" in instruction else
+        {"kind": "배너 캡처", "text": "고양이가 이불 속에서 코를 골아 웃었다", "ad_text": quote}
+    )
+    deps.fc_claims = [{**FC_CLAIM, "claim": quote, "source_quote": quote}]
+    return deps
+
+
+def test_ad_claim_from_first_classification_is_not_script_or_news_content(tmp_path, monkeypatch):
+    from recap_shorts.llm import gemini_api as G
+    from recap_shorts.script.prompt import build_prompt
+    from tests.test_factcheck import gem
+
+    deps = ad_pass_deps()
+    quote = deps.fc_claims[0]["source_quote"]
+    monkeypatch.setattr(G, "_post", lambda *a, **kw: gem({"kind": "info", "claims": deps.fc_claims}))
+    deps.factcheck_classify = lambda title, text, force: F.classify(title, text, force=force)
+    _, runner, job = make(tmp_path, deps, {"auto_steps": ["read", "script"]})
+    go(runner, job)
+    rec, topic = F.load_record(job.dir), read_topic(job.dir)
+    assert rec["claims"][0]["origin"] == "ad" and rec["status"] == "pass"
+    assert P.factcheck_status(job)["gate"] == "clear"
+    assert topic["facts"] == [] and quote not in build_prompt(topic)
+    assert deps.news_cards == [] and F.description_notice(rec)[1] == []
+    assert statuses(job)["scenes"] == "waiting"
 
 
 # ---------------------------------------------------------------- 멈춤 규칙: 자동 실행·continue
@@ -638,6 +670,7 @@ def finish_and_read_description(tmp_path, deps):
 @pytest.mark.parametrize("label, deps, note, news", [
     ("skipped", deps_for("skipped"), F.DEFAULT_NOTE, False),
     ("pass", deps_for("pass"), F.PASS_NOTE, True),
+    ("ad_pass", ad_pass_deps(), F.PASS_NOTE, False),
     ("warn", mixed_deps(), F.CAUTION_NOTE, True),
 ])
 def test_description_notice_follows_status(tmp_path, label, deps, note, news):
