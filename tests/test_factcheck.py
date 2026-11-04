@@ -285,7 +285,46 @@ def test_verify_false_stays_false_without_sources(monkeypatch):
     results = [{"id": "C1", "verdict": "false", "why": "보도와 다름", "fact": "그건 아님", "sources": []}]
     fake_post(monkeypatch, verdict_answer(results, chunks=[]))
     r = F.verify([VCLAIM])["results"][0]
+    assert r["verdict"] == "false" and r["fact"] == "그건 아님"
+
+
+def test_verify_false_fact_survives_record_but_is_not_a_topic_fact(monkeypatch, tmp_path):
+    use_or_key(monkeypatch)
+    fact = "식약처는 원유 함량 표시 제도 개선 검토에 착수했다."
+    results = [res("C1", "false", why=fact, fact=f"  {fact}  ", sources=[URL_A])]
+    fake_post(monkeypatch, verdict_answer(results, chunks=[web(URL_A, "표시 제도 개선 검토")]))
+    ver = F.verify([VCLAIM])
+    assert ver["results"][0]["verdict"] == "false"
+    assert ver["results"][0]["fact"] == fact
+    assert ver["results"][0]["why"] == fact
+    assert ver["results"][0]["sources"][0]["url"] == URL_A
+    rec = F.build_record(TITLE, SRC, {"kind": "info", "claims": [VCLAIM]}, ver)
+    F.save_record(tmp_path, rec)
+    saved = F.load_record(tmp_path)
+    assert saved["claims"][0]["fact"] == fact
+    assert saved["status"] == "stop"
+    assert F.gate(saved, TITLE, SRC, F.POLICY_VERSION)[0] == "blocked"
+    assert F.topic_additions(saved) == {
+        "facts": [],
+        "false_claims": [{"id": "C1", "claim": VCLAIM["claim"], "source_quote": VCLAIM["source_quote"]}],
+        "unverified_claims": [],
+    }
+
+
+@pytest.mark.parametrize("fact", [None, "", "   "])
+def test_verify_false_empty_fact_stays_none(monkeypatch, fact):
+    use_or_key(monkeypatch)
+    fake_post(monkeypatch, verdict_answer([res("C1", "false", fact=fact)], chunks=[]))
+    r = F.verify([VCLAIM])["results"][0]
     assert r["verdict"] == "false" and r["fact"] is None
+
+
+def test_verify_unverified_discards_model_fact(monkeypatch):
+    use_or_key(monkeypatch)
+    results = [res("C1", "unverified", fact="확인되지 않은 문장", sources=[URL_A])]
+    fake_post(monkeypatch, verdict_answer(results, chunks=[web(URL_A, "기사")]))
+    r = F.verify([VCLAIM])["results"][0]
+    assert r["verdict"] == "unverified" and r["fact"] is None
 
 
 def test_verify_unknown_verdict_and_missing_result_become_unverified(monkeypatch):
@@ -445,7 +484,7 @@ def test_topic_additions_facts_false_and_unverified():
     rec = mk_record("warn", claims=[
         claim("C1", "true", fact="첫 사실", sources=[SRC_A]),
         claim("C2", "partly", fact="바로잡은 문장", sources=[SRC_B]),
-        claim("C3", "false"),
+        claim("C3", "false", fact="보도로 확인된 실제 내용", sources=[SRC_A]),
         claim("C4", "unverified"),
         claim("C5", "true", fact=None, sources=[SRC_A]),
         claim("C6", "true", fact="출처 없음"),

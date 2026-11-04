@@ -62,17 +62,17 @@ _RULE_FORCE = "kind 가 general 이어도 사실 주장이 하나라도 있으�
 
 _VERIFY_HEAD = """너는 한국어 뉴스 사실 확인 담당이다. 아래 주장을 웹 검색으로 찾은 보도와 대조하라. 오늘은 <<오늘>>이다.
 
-verdict 는 다음 영문 값 중 하나다.
-- "true": 보도로 주장이 확인된다. 주장과 보도의 단계가 같으면 true 다. 예를 들어 '검토에 착수했다'는 주장은 검토 착수 보도로 확인되면 true 다.
-- "partly": 주장의 일부만 보도로 확인되거나 맞는 부분과 틀린 부분이 섞였다. 검토·가능성·발표 예정만 보도됐는데 주장이 더 앞선 단계인 확정·시행을 말하면 partly 다. fact 에 보도로 확인된 내용을 바로잡아 적는다.
-- "false": 보도가 주장과 반대되는 사실을 분명히 보도한다. 근거가 애매하면 false 가 아니라 unverified 다.
-- "unverified": 보도가 주장을 직접 다루지 않거나, 주장 내용의 사실 여부를 판단할 보도 근거가 부족하다. 검토·가능성·발표 예정 단계라는 이유만으로 unverified 로 두지 말고, 주장과 보도의 단계를 비교해 위의 true·partly 규칙을 적용한다.
+verdict 는 다음 영문 값 중 하나다. 먼저 핵심 행동·대상·수치·주체를 비교하고, 같을 때 단계·정도·세부를 비교한다.
+- "true": 보도로 주장의 핵심과 단계가 확인된다. '식약처가 표시 제도 개선 검토에 착수했다'는 주장은 그 검토 착수 보도가 있으면 true 다. 검토 단계라는 이유나 시행 보도가 없다는 이유로 false·partly·unverified 로 두지 않는다.
+- "false": 다음 둘 중 하나다. (1) 보도가 주장과 핵심이 다른 사실을 전한다. 행동·대상·수치·주체가 다르면 일부 단어가 같아도 false 다. 예: 보도는 '표시 제도 개선 검토', 주장은 '2027년 1월부터 원유 함량 50% 미만 가공유 판매 전면 금지 발표'이면 행동이 달라 false 다. 보도는 '우유는 원유 100%', 주장은 '서울우유 흰우유는 원유 40%여서 판매 금지'이면 핵심 수치가 달라 false 다. (2) 주장이 반드시 보도될 만한 구체적 공적 사건(공식 발표, 확정, 금지·시행 날짜, 체포, 사망, 처벌 등)인데 관련 보도는 있으나 그 사건을 전한 보도가 없다. 예: 관련 정책 보도는 있지만 주장한 판매 금지 발표를 전한 보도가 없으면 false 다. 단, 핵심이 같고 단계·정도·세부만 다른 경우는 아래 partly 규칙을 따른다.
+- "partly": 핵심 행동·대상·수치·주체는 같고 단계·정도·세부만 다를 때다. 예: 보도는 '표시 제도 개선 검토 착수', 주장은 '표시 제도 개선 시행 예정'이면 같은 개선 행동의 단계 차이이므로 partly 다. '표시 개선'을 '판매 금지'로 바꾼 주장은 단계 차이가 아니므로 partly 가 아니라 false 다.
+- "unverified": 관련 보도가 아예 없고, 반드시 보도될 만한 공적 사건도 아닐 때만이다. 예: 보도가 없는 개인 경험이나 작은 지역 일이다. 관련 보도가 있는데 주장한 구체적 공적 사건의 보도만 없다는 이유로 unverified 로 두지 않는다.
 
 규칙
 - 보도에 없는 내용을 추측으로 채우지 않는다.
-- fact 는 verdict 가 true 또는 partly 일 때만 한 문장으로 쓴다. 그 밖에는 null 이다.
+- fact 는 verdict 가 true·partly·false 일 때 보도로 확인된 실제 내용을 한 문장으로 쓴다. false 일 때도 거짓 주장을 반복하거나 단순히 부정하지 말고 보도가 확인한 실제 내용을 적는다. unverified 이면 null 이다.
 - sources 에는 근거로 든 기사 URL 만 넣는다. 검색으로 실제 찾은 기사 URL 이어야 한다.
-- why 는 한두 문장이다.
+- why 는 보도가 실제로 말하는 내용을 한 문장으로 적는다. 관련 보도가 아예 없으면 관련 보도를 찾지 못했다고 적고, 보도 내용을 지어내지 않는다.
 
 JSON 형식: {"results": [{"id": "C1", "verdict": "true" | "partly" | "false" | "unverified", "why": "...", "fact": "... 또는 null", "sources": ["https://..."]}], "overall_why": "한 문장"}"""
 
@@ -250,7 +250,7 @@ def verify(claims: list[dict]) -> dict:
         if verdict not in VERDICTS:
             verdict = "unverified"
         why = str(r.get("why") or "").strip() if r else "판정 결과가 없습니다."
-        fact = (str(r.get("fact") or "").strip() or None) if verdict in ("true", "partly") else None
+        fact = (str(r.get("fact") or "").strip() or None) if verdict in ("true", "partly", "false") else None
         sources = _sources(r.get("sources"), cited)
         if verdict in ("true", "partly") and not sources:
             verdict, why, fact = "unverified", "인용된 출처가 없어 확인 불가로 내렸습니다.", None
