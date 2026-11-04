@@ -28,6 +28,24 @@ def statuses(job):
     return {s["key"]: s["status"] for s in job.state["steps"]}
 
 
+def test_read_instruction_excludes_ad_slots_and_preserves_body_and_required_wording():
+    for phrase in (
+        "캡처 속 배너·스폰서 광고 칸(업체 이름·연락처·주소·URL·심의번호로 된 광고 문구)은 옮겨 적지 않는다.",
+        "게시글 본문 안에서 글쓴이가 직접 쓴 상품·업체 이야기는 그대로 옮긴다(광고 칸만 뺀다).",
+        "그림 속 글자를 한 글자도 바꾸지 말고 위에서 아래, 왼쪽에서 오른쪽 순서로 옮겨 적어라.",
+        "보이지 않는 글자를 추측해 만들지 말 것.",
+        "계정 아이디·닉네임·전화번호 같은 개인정보는 옮겨 적지 말고 [아이디] 처럼 표시한다.",
+        'JSON 객체 하나만 출력:\n'
+        '{"kind": "그림 종류를 짧게(예: 비교표, SNS 글 캡처, 글 카드, 사진, 짤)",\n'
+        ' "fan_made": 팬이 직접 만든 표·합성처럼 공식·확인된 자료가 아니면 true,\n'
+        ' "text": "옮겨 적은 글자(줄바꿈은 \\n)",\n'
+        ' "summary": "그림 내용 한 줄",\n'
+        ' "has_face": 사람 얼굴이 또렷이 보이면 true,\n'
+        ' "has_id_text": 아이디·닉네임·전화번호 같은 개인정보 글자가 보이면 true}',
+    ):
+        assert phrase in P.READ_INSTRUCTION
+
+
 def test_full_flow_waits_at_confirm_steps(tmp_path):
     settings.save({"gemini_api_key": "test-gemini-key-0000000000"})      # 기본 목소리·그림이 Gemini 인 상태(키 없으면 로컬)
     deps = FakeDeps()

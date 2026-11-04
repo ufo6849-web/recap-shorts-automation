@@ -511,7 +511,7 @@ def test_script_check_not_called_without_false_or_unverified(tmp_path):
 @pytest.mark.parametrize("url,suffix,outlet", [
     ("https://www.mt.co.kr/a", " - 머니투데이", "머니투데이"),
     ("https://starnewskorea.com/a", " | 스타뉴스", "스타뉴스"),
-    ("https://unknown.example.com/a", " :: 공감언론 뉴시스 ::", "공감언론 뉴시스"),
+    ("https://unknown.example.com/a", " :: 공감언론 뉴시스 ::", "공감언론 뉴시스 (unknown.example.com)"),
 ])
 def test_news_cards_use_normalized_source_title_and_outlet(tmp_path, url, suffix, outlet):
     deps = deps_for("pass")
