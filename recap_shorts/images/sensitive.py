@@ -391,7 +391,7 @@ def run(job_dir: str | Path, entries: list[dict], *, read_fn, cfg: dict | None =
     cache = Cache(job_dir / CACHE_REL)
     todo: list[tuple[dict, Path]] = []
     for e in entries:
-        if e.get("sensitive") or e.get("status") not in ("ok", "reused") or e.get("role") == "dc_head":
+        if e.get("sensitive") or e.get("status") not in ("ok", "reused") or e.get("role") in ("dc_head", "news"):
             continue
         if e.get("kind") == "ai" and not cfg["check_ai"]:
             continue

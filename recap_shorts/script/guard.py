@@ -45,6 +45,21 @@ def evidence_in_source(evidence: str | None, source_text: str) -> bool:
     return bool(ev) and ev in normalize_loose(source_text)
 
 
+FALSE_OVERLAP_MIN = 6   # 사실 아님 주장의 원문 구절과 근거가 같은지: 정규화 후 6자 이상인 쪽이 다른 쪽에 들어 있어야 한다
+
+
+def _same_source(a: str, b: str) -> bool:
+    return (len(a) >= FALSE_OVERLAP_MIN and a in b) or (len(b) >= FALSE_OVERLAP_MIN and b in a)
+
+
+def _false_claim_of(evidence: str | None, false_quotes: list[tuple[dict, str]]) -> dict | None:
+    """근거(evidence)가 사실 아님 주장의 원문 구절과 겹치면 그 주장. false_quotes = [(주장, 정규화한 source_quote)]."""
+    if not evidence:
+        return None
+    ne = normalize_loose(evidence)
+    return next((c for c, q in false_quotes if _same_source(ne, q)), None)
+
+
 def _numbers(text: str) -> list[str]:
     return [m.replace(",", "") for m in re.findall(r"\d[\d,]*(?:\.\d+)?", text)]
 
@@ -220,6 +235,8 @@ def run_guard(script: dict, topic: dict) -> tuple[dict, dict]:
     norm_src = normalize_loose(haystack)
     src_numbers = set(_numbers(haystack))
 
+    false_quotes = [(c, normalize_loose(c.get("source_quote") or "")) for c in topic.get("false_claims") or []]
+
     sc = json.loads(json.dumps(script, ensure_ascii=False))
     sc.setdefault("flags", [])
     flags: list[str] = []
@@ -241,10 +258,13 @@ def run_guard(script: dict, topic: dict) -> tuple[dict, dict]:
         s["evidence"] = ev
         reason = None
         banned = next((b for b in BANNED if b in text), None)
+        hit = None if not text or banned else _false_claim_of(ev, false_quotes)
         if not text:
             reason = "빈 문장"
         elif banned:
             reason = f"금지 표현 '{banned}'"
+        elif hit:
+            reason = f"사실 아님 주장({hit['id']})과 같은 근거"
         elif ev is not None:
             if normalize_loose(ev) not in norm_src:
                 reason = "근거 구절이 원문에 없음"
@@ -259,6 +279,8 @@ def run_guard(script: dict, topic: dict) -> tuple[dict, dict]:
         if reason:
             deleted.append({"index": i, "text": text, "reason": reason})
             take_deleted = take_deleted or as_bool(s.get("take"))
+            if hit:
+                flags.append(f"사실 확인: 사실 아님 주장({hit['id']})과 같은 근거라 문장 {i + 1} 삭제")
         else:
             kept.append(s)
     sc["sentences"] = kept

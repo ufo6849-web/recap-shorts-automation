@@ -14,12 +14,17 @@
  - 글자가 거의 없는 사진·짤(첨부 text 가 짧고 kind 에 '사진'·'짤')은 다른 이야기로 빼지 않는다.
    글쓴이 사진 8장처럼 겹쳐 볼 글자가 없는 사진은 글자로 가리면 전부 0점이 되고
    AI 가 만든 그림이 그 자리를 채워(시청자에게 글쓴이 사진처럼 보임) 버린다. 글자 많은 캡처를 가려내던 규칙은 그대로 둔다.
+ - 뉴스 카드(role "news"): 자료 확인으로 얻은 사실의 출처 기사 카드. 그 사실을 evidence 로 쓴 본문 문장(훅 제외)에만
+   NEWS_MATCH 점수를 주고 다른 문장은 0. 캡처처럼 칸을 세고 순서를 매기며, AI 로 세지 않는다.
 """
 from __future__ import annotations
 
 import re
 
+from recap_shorts.script.text import normalize_loose
+
 CAP_WORDS = ("캡처", "표", "카드", "스크린샷", "게시글", "글 ")
+NEWS_MATCH = 0.95            # 뉴스 카드(role news)가 그 사실을 근거로 쓴 본문 문장에 주는 점수. 다른 문장은 0
 ATTACH_REF = re.compile(r"첨부\s*그림\s*(\d+)")
 SAME_ATTACH_BONUS = 0.15      # 문장이 말하는 첨부의 통째 캡처
 RELATED_MIN = 0.35            # 대본이 말한 첨부와 글자(두 글자씩) 겹침이 이만큼이면 같은 이야기(다른 이야기는 많아야 0.20)
@@ -112,9 +117,16 @@ def off_script(sentences: list[dict], images: list[dict], attachments: list[dict
     return {j for j, im in enumerate(images) if im["kind"] == "cap" and not im.get("role") and _att(im) in drop}
 
 
+def _news_match(evidence: str | None, fact_text: str | None) -> bool:
+    """문장의 evidence 와 뉴스 카드의 fact_text 가 같은 사실인가(정규화 후 같거나 한쪽이 다른 쪽을 품음). 빈 글은 맞지 않는다."""
+    a, b = normalize_loose(evidence or ""), normalize_loose(fact_text or "")
+    return bool(a and b) and (a == b or a in b or b in a)
+
+
 def heuristic_scores(sentences: list[dict], images: list[dict], attachments: list[dict] | None = None) -> list[list[float]]:
     """sentences: [{"index","hint","role"}], images: [{"file","kind","sentence","role","attachment"}]
-    image role: "focus"(문장용으로 잘라 낸 캡처, sentence 있음) | "dc_head"(디시 글 머리) | None(통째 캡처·AI).
+    image role: "focus"(문장용으로 잘라 낸 캡처, sentence 있음) | "dc_head"(디시 글 머리) | "news"(뉴스 카드: fact_text 와
+    문장 evidence 가 같은 사실일 때만 점수) | None(통째 캡처·AI).
     attachments: topic.json 의 첨부 목록(없으면 다른 이야기 첨부를 가려내지 않음)."""
     n = len(sentences)
     whole = [j for j, im in enumerate(images) if im["kind"] == "cap" and not im.get("role")]
@@ -137,6 +149,8 @@ def heuristic_scores(sentences: list[dict], images: list[dict], attachments: lis
                 v += 0.75 if im.get("sentence") == s["index"] else 0.0
             elif role == "dc_head":
                 v += 0.75 if hook else -0.1
+            elif role == "news":
+                v = NEWS_MATCH if not hook and _news_match(s.get("evidence"), im.get("fact_text")) else 0.0
             elif j in drop:
                 v = 0.0                                                # 이 영상이 말하지 않는 첨부
             else:
@@ -270,5 +284,5 @@ def assign(scores: list[list[float]], counts: list[int], kinds: list[str] | None
 
 
 def kind_of(image: dict) -> str:
-    """assign 의 kinds 값: "ai" | "focus" | "dc_head" | "cap"(통째 캡처)."""
+    """assign 의 kinds 값: "ai" | "focus" | "dc_head" | "news" | "cap"(통째 캡처). news 는 assign 에서 cap 처럼 센다."""
     return "ai" if image["kind"] == "ai" else (image.get("role") or "cap")
