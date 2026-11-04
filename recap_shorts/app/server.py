@@ -143,6 +143,27 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
                 st["offline"] = True
         st["factcheck_policy"] = st.get("factcheck_policy")
         st["factcheck"] = P.factcheck_view(job)
+        current = P.factcheck_status(job)
+        if not current["legacy"]:
+            rec = current["record"] or {}
+            for step in st["steps"]:
+                if step["key"] != "read":
+                    continue
+                for sub in step.get("sub") or []:
+                    if sub["label"] != "사실 확인":
+                        continue
+                    if st.get("factcheck_running") or (step["status"] == "running" and sub["status"] == "running"):
+                        status, note = "running", "확인 중"
+                    elif current["stale"] or current["missing"]:
+                        status, note = "error", "글이 바뀌어 다시 확인해야 합니다"
+                    elif current["gate"] == "clear" and rec.get("status") in ("stop", "failed"):
+                        status, note = "done", "직접 확인으로 넘김"
+                    elif current["gate"] == "clear" and rec.get("status") == "warn":
+                        status, note = "done", "주의 확인하고 넘김"
+                    else:
+                        status = "error" if current["gate"] == "blocked" else "done"
+                        note = P._FC_NOTE.get(rec.get("status"), current["gate_reason"] or "확인 결과 없음")
+                    sub.update(status=status, note=note)
         if brief:
             st["log"] = st["log"][-5:]
         return st
@@ -931,6 +952,9 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
             script, check, info = _refine(topic, base, base_check, llm)
             check = dict(check)
             check["refine"] = info
+            rec = fc.load_record(j.dir)
+            if rec and any(x.get("verdict") in ("false", "unverified") for x in rec.get("claims") or []):
+                script, check = P._script_factcheck(P.Ctx(j, "script", deps), script, check, rec)
             save_script(j, script, check, "다시 다듬음 — 확인하세요")
             j.log("대본 다듬기를 다시 함" + ("" if info["applied"] else f" (적용 안 됨: {info['error']})"))
 
