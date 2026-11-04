@@ -1,4 +1,4 @@
-"""외부 호출(디시, Gemini, 이미지 서버, 목소리, 렌더, Clef)을 전부 가짜로 바꾼 Deps."""
+"""외부 호출(디시, Gemini, 이미지 서버, 목소리, 렌더, Clef, 사실 확인, 뉴스 카드)을 전부 가짜로 바꾼 Deps."""
 from __future__ import annotations
 
 import json
@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
+from recap_shorts import factcheck as F
 from recap_shorts.collect.blind import Post as BlindPost
 from recap_shorts.collect.dcinside import Post
 from recap_shorts.pipeline import Deps
@@ -37,6 +38,13 @@ REFINED_TEXTS = [
     "근데 이게 전부 구청 공무원들끼리 하는 리그라니, 놀랍지 않아?",
     "그래도 축구는 끝까지 모르는 거지.",
 ]
+
+# 사실 확인 시험용 기사·주장(네트워크 없음). 주장 근거 구절은 READ_TEXT 안에 있다.
+FC_URL = "https://news.example.kr/society/2026/11/02/football-final"
+FC_SOURCE = {"url": FC_URL, "title": "동네 축구 결승에 구청 직원 출전", "outlet": "조선일보", "date": "2026-11-02"}
+FC_CLAIM = {"id": "C1", "claim": "구청 직원 3명이 결승에 선발로 나왔다", "query": "구청 직원 축구 결승",
+            "source_quote": "구청 직원 3명이 선발로 출전"}
+FC_FACT = "구청 직원 3명이 선발로 출전했다"
 
 
 class FakeLLM:
@@ -75,6 +83,17 @@ class FakeDeps(Deps):
         self.clef_matrix = None
         self.generated: list[str] = []
         self.redo_args: list = []
+        # 사실 확인: 기본은 일반 글(건너뜀). 시험이 kind·판정·실패를 바꾼다.
+        self.fc_kind = "general"                               # 분류 결과 kind
+        self.fc_claims: list[dict] = [dict(FC_CLAIM)]          # 분류가 뽑은 주장
+        self.fc_verdicts: dict[str, dict] = {}                 # 주장 id → 판정 항목(빠진 칸은 "보도로 확인됨")
+        self.fc_classify_error: str | None = None              # 분류에서 낼 FactcheckError 문장
+        self.fc_verify_error: str | None = None                # 판정에서 낼 FactcheckError 문장
+        self.fc_script_error: str | None = None                # 대본 검수에서 낼 FactcheckError 문장
+        self.fc_script_flags: list[dict] = []                  # 대본 검수 결과(script_check 모양)
+        self.fc_hook = None                                    # 분류 때 한 번 부르는 함수(시험이 낀 순간을 만든다)
+        self.fc_draw_fail: set[str] = set()                    # 이 제목의 뉴스 카드는 그리기에 실패한다
+        self.news_cards: list[dict] = []                       # 그린 뉴스 카드 기록
 
     def hit(self, name: str) -> None:
         self.calls[name] = self.calls.get(name, 0) + 1
@@ -194,6 +213,42 @@ class FakeDeps(Deps):
             progress(1.0)
         Path(out_mp4).write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"0" * 64)
         return {"out": str(out_mp4), "duration": 30.0}
+
+    # 사실 확인(네트워크 없음)
+    def factcheck_classify(self, title, text, force=False):
+        self.hit("factcheck_classify")
+        if self.fc_hook:
+            self.fc_hook()
+        if self.fc_classify_error:
+            raise F.FactcheckError(self.fc_classify_error)
+        claims = [dict(c) for c in self.fc_claims] if (force or self.fc_kind != "general") else []
+        return {"kind": self.fc_kind, "reason": "시험용 분류", "claims": claims}
+
+    def factcheck_verify(self, claims):
+        self.hit("factcheck_verify")
+        if self.fc_verify_error:
+            raise F.FactcheckError(self.fc_verify_error)
+        results = []
+        for c in claims:
+            v = {"verdict": "true", "why": "보도로 확인됨", "fact": FC_FACT, "sources": [dict(FC_SOURCE)]}
+            v.update(self.fc_verdicts.get(c["id"], {}))
+            results.append({"id": c["id"], **v})
+        return {"results": results, "overall_why": "시험용 판정", "model": "fake-verify", "search": "exa:5",
+                "cost_usd": 0.02}
+
+    def factcheck_script_check(self, script, record):
+        self.hit("factcheck_script_check")
+        if self.fc_script_error:
+            raise F.FactcheckError(self.fc_script_error)
+        return [dict(f) for f in self.fc_script_flags]
+
+    def draw_news_card(self, title, outlet, date, out):
+        self.hit("draw_news_card")
+        if title in self.fc_draw_fail:
+            raise RuntimeError("뉴스 카드 그리기 실패(시험)")
+        self.news_cards.append({"title": title, "outlet": outlet, "date": date, "file": str(out)})
+        png(Path(out), (108, 81), (240, 240, 240))
+        return Path(out)
 
     # Clef
     def clef_inspect(self, path, kind):

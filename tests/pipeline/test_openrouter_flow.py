@@ -78,7 +78,8 @@ def test_openrouter_only_read_and_script_use_the_right_models(tmp_path, monkeypa
     assert (job.dir / "script_final" / "script.json").is_file()
     models = [s["model"] for s in or_post.sent]
     assert models[0] == "google/gemini-3.8-flash"                       # 그림 읽기는 Gemini 3.8 Flash
-    assert models[1:] and all(m == "anthropic/claude-opus-5.5" for m in models[1:])   # 초안·다듬기는 Claude Opus 5.5
+    assert models[1] == "google/gemini-3.8-flash"                       # 사실 확인 분류(정보성 판별)도 같은 Flash — 읽기 단계에서 한 번 더
+    assert models[2:] and all(m == "anthropic/claude-opus-5.5" for m in models[2:])   # 초안·다듬기는 Claude Opus 5.5
     assert all(s["url"] == OR_URL and s["auth"] == f"Bearer {OR_KEY}" for s in or_post.sent)
     assert [kind for kind, _ in rows] == ["openrouter"] * len(models)
     assert [f["model"] for _, f in rows] == models                       # 기록에도 같은 모델 이름이 남는다

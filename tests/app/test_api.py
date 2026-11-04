@@ -246,6 +246,10 @@ def test_topic_edit_resets_script(env):
     client.put(f"/api/jobs/{jid}/topic", json={"topic": "새 주제"})
     st = client.get(f"/api/jobs/{jid}").json()
     assert step(st, "script")["status"] == "todo" and step(st, "read")["status"] == "waiting"
+    # 글이 바뀌어 사실 확인 기록이 낡았다 → 다시 확인하기 전에는 넘어갈 수 없다(설계 11.5)
+    assert client.post(f"/api/jobs/{jid}/continue").status_code == 409
+    P.recheck_factcheck(app.state.runner, app.state.store.get(jid))
+    idle(app)
     client.post(f"/api/jobs/{jid}/continue")
     idle(app)
     assert step(client.get(f"/api/jobs/{jid}").json(), "script")["status"] == "waiting"
