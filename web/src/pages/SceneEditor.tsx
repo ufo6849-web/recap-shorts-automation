@@ -216,7 +216,7 @@ export default function SceneEditor({ id }: { id: string }) {
             <img src={resolve(shot.file)} alt="" className="aspect-[4/3] w-[168px] shrink-0 rounded-[10px] bg-fill object-cover" />
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">
-                <Chip>{KIND[entry?.kind ?? ""] ?? "그림"}</Chip>
+                <Chip>{entry?.role === "news" ? "뉴스" : (KIND[entry?.kind ?? ""] ?? "그림")}</Chip>
                 {entry?.kind === "cap" && (entry.needs_review && !entry.sensitive?.flagged ? <Chip tone="warn">가림 확인 필요</Chip> : <Chip tone="ok">{entry.blurred ? "가림 확인됨" : "확인함"}</Chip>)}
                 {entry?.sensitive && entry.sensitive.level !== "none" && <Chip tone={entry.sensitive.level === "strong" ? "bad" : "warn"}>자극적인 그림{entry.sensitive.treatment === "gray" ? " · 흑백" : entry.sensitive.treatment === "gray_blur" ? " · 흑백+흐림" : ""}</Chip>}
                 {entry?.recommend_regenerate && <Chip tone="warn">다시 만들기 추천</Chip>}
@@ -224,7 +224,7 @@ export default function SceneEditor({ id }: { id: string }) {
               <div className="mt-2 truncate text-[13px] text-sub" title={shot.file}>{shot.file}</div>
               {(entry?.needs_review || entry?.recommend_regenerate || (entry?.sensitive && entry.sensitive.level !== "none")) && entry.review_reason && <div className="mt-1 text-[13px] text-warn-text">{entry.review_reason}</div>}
               <div className="mt-3 flex flex-wrap gap-2">
-                {entry?.kind === "cap" && <Button size="sm" variant={entry.needs_review ? "primary" : "secondary"} icon={<ShieldCheck size={15} {...ICON} />} disabled={isArchived(job.data)} onClick={() => openBlur(shot.file)}>가리기</Button>}
+                {entry?.kind === "cap" && entry.role !== "news" && <Button size="sm" variant={entry.needs_review ? "primary" : "secondary"} icon={<ShieldCheck size={15} {...ICON} />} disabled={isArchived(job.data)} onClick={() => openBlur(shot.file)}>가리기</Button>}
                 {entry?.kind === "ai" && <Button size="sm" variant="secondary" icon={<Wand2 size={15} {...ICON} />} disabled={busy !== null || running || isArchived(job.data)} onClick={() => setPrompting((v) => !v)}>이미지 다시 만들기</Button>}
                 <Button size="sm" variant="secondary" icon={<Mic size={15} {...ICON} />} disabled={busy !== null || running || !sent || isArchived(job.data)}
                   onClick={() => sent && act("redo", () => api.redoVoice(id, sent.index), `${sent.index === 0 ? "훅" : sent.index + "번 문장"}을 다시 녹음합니다.`)}>문장 다시 녹음</Button>

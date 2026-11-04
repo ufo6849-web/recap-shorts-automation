@@ -6,7 +6,7 @@ import JobHeader from "../components/JobHeader";
 import { go, useCopy, useLoad } from "../hooks";
 import { clock, flagText, isArchived } from "../lib";
 import { Button, Card, Chip, ICON, SectionLabel, Status, cx } from "../ui";
-import type { AssetEntry, ReviewJson, SensitiveInfo } from "../types";
+import type { AssetEntry, JobState, ReviewJson, SensitiveInfo } from "../types";
 
 interface Metric { label: string; value: number; ref_low: number; ref_high: number; unit?: string; ref_name?: string }
 interface ClefRow { key: string; label: string; value: number; good: boolean; note: string }
@@ -62,6 +62,16 @@ function warnRows(r: ReviewJson, live: Map<string, AssetEntry>, used: Set<string
   sfx.forEach((w, k) => out.push({ key: `sfx${k}`, what: `효과음 ${clock(w.t)} · ${w.id}`, msg: w.note, open: true,
     state: w.level === "high" ? "저작권 위험 높음" : "저작권 주의", tone: w.level === "high" ? "bad" : "warn" }));
   return out;
+}
+
+// 사실 확인 줄(11.7): 주의를 확인하고 넘긴 것 · 직접 확인으로 넘긴 것 · 사실 확인 없이 만든 이전 작업(정책 없음, 읽기는 끝남)
+function factRows(j: JobState): WarnRow[] {
+  const fc = j.factcheck;
+  if (j.factcheck_policy == null) return j.steps.find((s) => s.key === "read")?.status === "done"
+    ? [{ key: "fc-legacy", what: "사실 확인", msg: "사실 확인 없이 만든 이전 작업", open: true, state: "확인 안 함" }] : [];
+  if (fc?.override) return [{ key: "fc-override", what: "사실 확인", msg: `직접 확인으로 넘김 — ${fc.override.note}`, open: true, state: "직접 확인", tone: "warn" }];
+  if (fc?.status === "warn" && fc.ack) return [{ key: "fc-ack", what: "사실 확인", msg: "일부 주장이 보도로 확인되지 않았습니다", open: false, state: "확인함" }];
+  return [];
 }
 
 // 자극적인 그림 처리(config/sensitive.json, recap_shorts/images/sensitive.py): 판정 level·kind 와 지금 처리 상태
@@ -163,7 +173,7 @@ export default function Review({ id }: { id: string }) {
   const unchecked = (assets.data ?? []).filter((e) => e.needs_review && used.has(e.file) && !e.sensitive?.flagged);
   const sens = (assets.data ?? []).filter((e) => e.sensitive && e.sensitive.level !== "none" && (!tl.data || used.has(e.file)))
     .sort((a, b) => Number(b.sensitive!.level === "strong") - Number(a.sensitive!.level === "strong"));
-  const warns = review ? warnRows(review, new Map((assets.data ?? []).map((e) => [e.file, e])), tl.data ? used : null, new Set([...unchecked, ...sens].map((e) => e.file))) : [];
+  const warns = [...(j ? factRows(j) : []), ...(review ? warnRows(review, new Map((assets.data ?? []).map((e) => [e.file, e])), tl.data ? used : null, new Set([...unchecked, ...sens].map((e) => e.file))) : [])];
   const { done, copy } = useCopy();
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
