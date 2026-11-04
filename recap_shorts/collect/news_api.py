@@ -53,8 +53,10 @@ def outlet_for(url: str, outlets: dict | None = None, *, fallback: str = "") -> 
 def title_and_outlet(title: str, url: str, outlets: dict | None = None, *, outlet: str = "") -> tuple[str, str]:
     """등록 이름을 우선하며, 미등록 출처의 제목 접미사는 실제 호스트와 함께 표시한다."""
     outlets = load_outlets() if outlets is None else outlets
-    title = "".join(ch for ch in title if unicodedata.category(ch) not in {"Cc", "Cf", "Zl", "Zp"})
-    outlet = "".join(ch for ch in outlet if unicodedata.category(ch) not in {"Cc", "Cf", "Zl", "Zp"}).strip()
+    title = " ".join("".join(" " if ch.isspace() else ch for ch in title
+                             if ch.isspace() or unicodedata.category(ch) not in {"Cc", "Cf"}).split())
+    outlet = " ".join("".join(" " if ch.isspace() else ch for ch in outlet
+                              if ch.isspace() or unicodedata.category(ch) not in {"Cc", "Cf"}).split())
     suffix = re.fullmatch(r"(.+)\s+(?:[-|]\s+([^|:\r\n]+)|::\s*([^|:\r\n]+?)\s*::)\s*", title)
     name = (suffix[2] or suffix[3]).strip() if suffix else ""
     if not 2 <= len(name) <= 20:
@@ -62,12 +64,14 @@ def title_and_outlet(title: str, url: str, outlets: dict | None = None, *, outle
     host = outlet_for(url, {})
     registered = outlet_for(url, outlets)
     # 미등록 도메인이 등록 언론사 이름을 주장하면 접미사도 보존한다.
-    if registered == host and name in outlets.values():
+    # 표시용 공백은 보존하되, 이름 사이 공백으로 등록 언론사 사칭 검사를 우회하지 못하게 한다.
+    name_key = "".join(name.split())
+    if registered == host and name_key in {"".join(value.split()) for value in outlets.values()}:
         return title, host
     resolved = outlet_for(url, outlets, fallback=name)
     if registered == host and outlet:
         resolved = outlet  # 사용자가 직접 작성한 --news-json의 명시적 이름
-    if name and (name == resolved or resolved == f"{name} ({host})"):
+    if name and (name_key == "".join(resolved.split()) or resolved == f"{name} ({host})"):
         title = suffix[1].rstrip()
     return title, resolved
 

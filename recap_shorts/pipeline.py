@@ -532,12 +532,13 @@ def step_source(c: Ctx) -> None:
 READ_INSTRUCTION = """\
 이 그림은 인터넷 커뮤니티 게시글에 첨부된 이미지다(세로로 긴 그림이면 위에서 아래 순서로 자른 조각들이다).
 그림 속 글자를 한 글자도 바꾸지 말고 위에서 아래, 왼쪽에서 오른쪽 순서로 옮겨 적어라. 보이지 않는 글자를 추측해 만들지 말 것.
-캡처 속 배너·스폰서 광고 칸(업체 이름·연락처·주소·URL·심의번호로 된 광고 문구)은 옮겨 적지 않는다. 게시글 본문 안에서 글쓴이가 직접 쓴 상품·업체 이야기는 그대로 옮긴다(광고 칸만 뺀다).
+캡처 속 배너·스폰서 광고 칸 글자는 버리지 말고 별도 ad_text 필드에 글자 그대로 옮긴다(없으면 빈 문자열). text에는 광고 칸을 넣지 않는다. 게시글 본문 안에서 글쓴이가 직접 쓴 상품·업체 이야기는 text에 그대로 옮긴다.
 계정 아이디·닉네임·전화번호 같은 개인정보는 옮겨 적지 말고 [아이디] 처럼 표시한다.
 JSON 객체 하나만 출력:
 {"kind": "그림 종류를 짧게(예: 비교표, SNS 글 캡처, 글 카드, 사진, 짤)",
  "fan_made": 팬이 직접 만든 표·합성처럼 공식·확인된 자료가 아니면 true,
  "text": "옮겨 적은 글자(줄바꿈은 \\n)",
+ "ad_text": "광고 칸 글자(없으면 빈 문자열)",
  "summary": "그림 내용 한 줄",
  "has_face": 사람 얼굴이 또렷이 보이면 true,
  "has_id_text": 아이디·닉네임·전화번호 같은 개인정보 글자가 보이면 true}"""
@@ -579,6 +580,7 @@ def step_read(c: Ctx) -> None:
             f"제목: {clean_text(post.get('title'))}\n본문: {clean_text(post.get('text')).replace(chr(10), ' ')}")
     parts, atts = [head], []
     fc_exclude = [header]
+    fc_extra = []
     # 키가 없거나 틀려서 못 읽었으면 같은 실패를 그림마다 되풀이하지 않고 첫 실패에서 멈춘다.
     # 그 안내를 단계 오류로 그대로 올려 “글자를 못 읽음”보다 원인이 먼저 보이게 한다.
     key_fail: BaseException | None = None
@@ -600,6 +602,9 @@ def step_read(c: Ctx) -> None:
         fan = bool(r.get("fan_made"))
         tag = f"팬이 만든 {kind}(확인 안 된 자료)" if fan else kind
         text = clean_text(str(r.get("text") or ""))
+        ad_text = str(r.get("ad_text") or "").strip()
+        if ad_text:
+            fc_extra.append(f"[게시글 1 첨부 그림 {k} 광고 칸 글자]\n{ad_text}")
         parts.append(f"\n[게시글 1 첨부 그림 {k}: {tag}]\n{text}".rstrip())
         atts.append({"n": k, "file": f, "kind": kind, "fan_made": fan, "summary": str(r.get("summary") or ""),
                      "has_face": bool(r.get("has_face")), "has_id_text": bool(r.get("has_id_text")), "text": text})
@@ -607,7 +612,7 @@ def step_read(c: Ctx) -> None:
                               f"{' · 아이디' if r.get('has_id_text') else ''}")
     if key_fail is not None:
         raise key_fail
-    if files and not any(a.get("text") for a in atts):
+    if files and not any(a.get("text") for a in atts) and not fc_extra:
         raise RuntimeError("첨부 그림의 글자를 하나도 읽지 못했습니다")
     cm = c.dir / "post" / "comments.png"
     if cm.is_file():                         # 댓글 캡처(닉네임 가림) — 반응 문장·캡처 화면 재료
@@ -632,7 +637,7 @@ def step_read(c: Ctx) -> None:
     topic = {"topic": f"{gname} 게시글 「{clean_text(post.get('title'))}」의 내용 중 가장 흥미로운 반전 하나를 잡아 이야기한다. {caution}",
              "source_kind": "community", "source_url": src["url"],
              "tone_end": "웃기면서도 씁쓸한 감탄이나 물음 한 줄",
-             "source_text": "\n".join(parts), "attachments": atts, "fc_exclude": fc_exclude}
+             "source_text": "\n".join(parts), "attachments": atts, "fc_exclude": fc_exclude, "fc_extra": fc_extra}
     topic["topic_auto"] = topic["topic"]
     c.write_json("topic.json", topic)
     c.job.artifact("topic", "topic.json")
@@ -658,6 +663,9 @@ def fc_input(topic: dict) -> tuple[str, str]:
         text = f"주제: {topic_text}\n{text}"
         if title is None:
             title_text = topic_text
+    extras = topic.get("fc_extra")
+    if isinstance(extras, list):
+        text = "\n".join([text, *(block for block in extras if isinstance(block, str) and block.strip())])
     return title_text, text
 
 

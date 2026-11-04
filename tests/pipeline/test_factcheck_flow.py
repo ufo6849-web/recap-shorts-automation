@@ -218,6 +218,62 @@ def test_read_records_exact_header_comments_and_keeps_fake_ocr_marker(tmp_path, 
     assert P.factcheck_status(job)["gate"] == "blocked"
 
 
+@pytest.mark.parametrize("quote", ["정부 승인 완료", "삼성전자 신제품 출시", ""])
+def test_ad_banner_claim_reaches_verdict_or_promotion_skips(tmp_path, monkeypatch, quote):
+    from recap_shorts.llm import gemini_api as G
+    from tests.test_factcheck import gem, web
+
+    deps = FakeDeps()
+    ad_text = "스폰서\n발머스한의원 방문 상담 안내\nhttp://balmers.co.kr"
+    if quote:
+        ad_text += "\n" + quote
+    read_image = deps.read_image
+    deps.read_image = lambda images, instruction: (
+        read_image(images, instruction) if "댓글 목록" in instruction else
+        {"kind": "배너 캡처", "text": "고양이가 이불 속에서 코를 골아 웃었다", "ad_text": ad_text}
+    )
+    prompts = []
+
+    def post(model, body, **kwargs):
+        prompt = body["contents"][0]["parts"][0]["text"]
+        prompts.append(prompt)
+        assert ad_text.replace("\n", "\\n") in prompt
+        if prompt.startswith(F._FACT_QUOTES_HEAD):
+            return gem({"quotes": [quote] if quote else []})
+        if model == F.CLASSIFY_MODEL:
+            return gem({"kind": "general", "claims": []})
+        return gem({"results": [{"id": "C1", "verdict": "false", "why": "허위 발표",
+                                  "public_event": True, "sources": [FC_URL]}]},
+                   chunks=[web(FC_URL, "기업 발표 사실 확인")])
+
+    monkeypatch.setattr(G, "_post", post)
+    monkeypatch.setattr(G, "_openrouter_key", lambda: "test")
+    deps.factcheck_classify = lambda title, text, force: F.classify(title, text, force=force)
+    deps.factcheck_verify = F.verify
+    _, runner, job = make(tmp_path, deps)
+    go(runner, job)
+    topic = read_topic(job.dir)
+    assert ad_text not in topic["source_text"]
+    assert ad_text in P.fc_input(topic)[1]
+    assert any(p.startswith(F._CLASSIFY_HEAD) for p in prompts)
+    assert sum(p.startswith(F._FACT_QUOTES_HEAD) for p in prompts) == 1
+    rec = F.load_record(job.dir)
+    assert rec["input_hash"] == fc_hash(job)
+    assert rec["status"] == ("stop" if quote else "skipped")
+    assert P.factcheck_status(job)["gate"] == ("blocked" if quote else "clear")
+    if quote:
+        assert rec["claims"][0]["source_quote"] == quote
+        assert rec["claims"][0]["verdict"] == "false"
+        assert len(prompts) == 4  # 분류·재추출·2차 판별·판정
+    else:
+        assert rec["claims"] == [] and len(prompts) == 2
+    topic["fc_extra"][0] += "\n추가 승인 주장"
+    F.atomic_json(job.dir / "topic.json", topic)
+    assert rec["input_hash"] != fc_hash(job)
+    assert P.factcheck_status(job)["stale"] is True
+    assert P.factcheck_status(job)["gate"] == "blocked"
+
+
 def test_unexpected_error_in_check_is_recorded_and_read_completes(tmp_path):
     deps = FakeDeps()
 

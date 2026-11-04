@@ -11,6 +11,15 @@ from tests.pipeline.fakes import FakeDeps
 from tests.pipeline.test_pipeline import SRC
 
 
+def test_fc_input_appends_extra_after_exact_exclusions_without_changing_title():
+    block = "[게시글 1 첨부 그림 1 광고 칸 글자]\n제목: 가짜 제목\n정부 승인 완료"
+    topic = {"source_text": "제목: 실제 제목\n본문\n댓글", "fc_exclude": ["댓글", block],
+             "fc_extra": [block, None, "", "  ", 3]}
+    assert P.fc_input(topic) == ("실제 제목", "제목: 실제 제목\n본문\n\n" + block)
+    topic["fc_extra"] = "옛 비정상 필드"
+    assert P.fc_input(topic) == ("실제 제목", "제목: 실제 제목\n본문\n")
+
+
 def prepared(tmp_path, status="pass"):
     store = P.JobStore(tmp_path)
     job = store.create(dict(SRC))

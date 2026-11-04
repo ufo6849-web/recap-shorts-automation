@@ -28,10 +28,45 @@ def statuses(job):
     return {s["key"]: s["status"] for s in job.state["steps"]}
 
 
-def test_read_instruction_excludes_ad_slots_and_preserves_body_and_required_wording():
+@pytest.mark.parametrize("ad_text", [None, "", "스폰서\n정부 승인 완료\nhttps://company.example/제품"])
+@pytest.mark.parametrize("body", ["글쓴이가 직접 쓴 업체 이야기", ""])
+def test_read_ad_text_only_enters_factcheck_input(tmp_path, ad_text, body):
+    deps = FakeDeps()
+    read_image = deps.read_image
+
+    def read(images, instruction):
+        if "댓글 목록" in instruction:
+            return read_image(images, instruction)
+        result = {"kind": "기업 발표 캡처", "text": body}
+        if ad_text is not None:
+            result["ad_text"] = ad_text
+        return result
+
+    deps.read_image = read
+    _, runner, job = make(tmp_path, deps)
+    go(runner, job)
+    if not body and not ad_text:
+        assert statuses(job)["read"] == "error"
+        return
+    topic = json.loads((job.dir / "topic.json").read_text())
+    assert statuses(job)["read"] == "waiting"
+    expected = [f"[게시글 1 첨부 그림 {k} 광고 칸 글자]\n{ad_text}" for k in (1, 2)] if ad_text else []
+    assert topic["fc_extra"] == expected
+    title, text = P.fc_input(topic)
+    assert body in topic["source_text"]
+    if ad_text:
+        assert ad_text not in topic["source_text"]
+        assert all(ad_text not in a["text"] for a in topic["attachments"])
+        assert text.endswith("\n".join(expected))
+    else:
+        without_extra = {k: v for k, v in topic.items() if k != "fc_extra"}
+        assert P.fc_input(without_extra) == (title, text)
+
+
+def test_read_instruction_separates_ad_slots_and_preserves_body_and_required_wording():
     for phrase in (
-        "캡처 속 배너·스폰서 광고 칸(업체 이름·연락처·주소·URL·심의번호로 된 광고 문구)은 옮겨 적지 않는다.",
-        "게시글 본문 안에서 글쓴이가 직접 쓴 상품·업체 이야기는 그대로 옮긴다(광고 칸만 뺀다).",
+        "캡처 속 배너·스폰서 광고 칸 글자는 버리지 말고 별도 ad_text 필드에 글자 그대로 옮긴다(없으면 빈 문자열). text에는 광고 칸을 넣지 않는다.",
+        "게시글 본문 안에서 글쓴이가 직접 쓴 상품·업체 이야기는 text에 그대로 옮긴다.",
         "그림 속 글자를 한 글자도 바꾸지 말고 위에서 아래, 왼쪽에서 오른쪽 순서로 옮겨 적어라.",
         "보이지 않는 글자를 추측해 만들지 말 것.",
         "계정 아이디·닉네임·전화번호 같은 개인정보는 옮겨 적지 말고 [아이디] 처럼 표시한다.",
@@ -39,6 +74,7 @@ def test_read_instruction_excludes_ad_slots_and_preserves_body_and_required_word
         '{"kind": "그림 종류를 짧게(예: 비교표, SNS 글 캡처, 글 카드, 사진, 짤)",\n'
         ' "fan_made": 팬이 직접 만든 표·합성처럼 공식·확인된 자료가 아니면 true,\n'
         ' "text": "옮겨 적은 글자(줄바꿈은 \\n)",\n'
+        ' "ad_text": "광고 칸 글자(없으면 빈 문자열)",\n'
         ' "summary": "그림 내용 한 줄",\n'
         ' "has_face": 사람 얼굴이 또렷이 보이면 true,\n'
         ' "has_id_text": 아이디·닉네임·전화번호 같은 개인정보 글자가 보이면 true}',

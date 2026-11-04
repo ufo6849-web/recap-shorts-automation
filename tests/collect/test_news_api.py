@@ -127,7 +127,7 @@ def test_news_title_unknown_name_keeps_actual_host(prefix):
     assert N.title_and_outlet("기사 - 낯선신문", url) == ("기사", "낯선신문 (attacker.example)")
 
 
-@pytest.mark.parametrize("control", ["\n", "\r", "\t", "\x00", "\x7f", "\x85", "\u200b", "\u2028", "\u2029"] +
+@pytest.mark.parametrize("control", ["\x00", "\x7f", "\u200b"] +
                          [chr(n) for n in (*range(0x202A, 0x202F), *range(0x2066, 0x206A))])
 def test_news_title_removes_controls_before_outlet_comparison(control):
     for url, name, expected in [
@@ -147,6 +147,19 @@ def test_news_title_checks_length_after_removing_controls(length):
     expected = ("기사", f"{name} (unknown.example.com)") if 2 <= length <= 20 else (title, "unknown.example.com")
     assert N.title_and_outlet(f"기사 - 가\u202e{'가' * (length - 1)}\t", "https://unknown.example.com", {}) == expected
     assert N.outlet_for("https://unknown.example.com", {}, fallback=name + "\u202e") == expected[1]
+
+
+@pytest.mark.parametrize("space", ["\n", "\r\n", "\t", "\x85", "\u2028", "\u2029"])
+def test_news_title_preserves_word_boundaries_and_blocks_spaced_outlet_spoofing(space):
+    title = f"정부가{space}예금을\t 동결 - 연합뉴스"
+    assert N.title_and_outlet(title, "https://www.yna.co.kr/a") == ("정부가 예금을 동결", "연합뉴스")
+    assert N.title_and_outlet(title, "https://attacker.example/a") == (
+        "정부가 예금을 동결 - 연합뉴스", "attacker.example")
+    assert N.title_and_outlet(f"기사 - 연{space}합뉴스", "https://attacker.example/a") == (
+        "기사 - 연 합뉴스", "attacker.example")
+    assert N.title_and_outlet(f"기사 - 연{space}합뉴스", "https://www.yna.co.kr/a") == ("기사", "연합뉴스")
+    assert N.title_and_outlet(f"기사 - 낯선{space}신문", "https://attacker.example/a") == (
+        "기사", "낯선 신문 (attacker.example)")
 
 
 def test_news_title_registered_mapping_overrides_explicit_outlet():
