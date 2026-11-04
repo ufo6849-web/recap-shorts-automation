@@ -27,6 +27,22 @@ export interface ReviewJson {
   clef: null | { opens_finished?: number | null; face?: number | null; music?: number | null; narration?: number | null; caption_cut?: number | null; topic_match?: number | null; tokens?: number; neurons?: number; hint_only?: boolean };
 }
 
+/** 사실 확인 판정(11.3 claims[].verdict): true 사실 · partly 일부 사실 · false 사실 아님 · unverified 확인 불가. */
+export type FactVerdict = "true" | "partly" | "false" | "unverified";
+export interface FactSource { url: string; title: string; outlet: string; date: string | null }
+export interface FactClaim { id: string; claim: string; source_quote: string; verdict: FactVerdict; why: string; fact: string | null; sources: FactSource[] }
+/** 서버 view(11.5): factcheck.json(11.3)에서 input_hash 를 뺀 것에 stale·gate·gate_reason·running 을 더한다.
+ *  status "missing" 은 정책 작업인데 기록이 없을 때라 claims 는 [] 이고 나머지 값은 빠질 수 있다.
+ *  gate: clear 통과 · need_ack 확인하고 계속 · blocked 막힘(gate_reason 이 이유). */
+export interface FactcheckView {
+  version?: number; status: "skipped" | "pass" | "warn" | "stop" | "failed" | "missing";
+  kind?: "info" | "general" | "uncertain" | null; forced?: boolean; reason?: string | null;
+  claims: FactClaim[]; overall_why?: string; error?: string | null;
+  override?: { at: string; note: string } | null; ack?: { at: string } | null;
+  model?: string | null; search?: string; cost_usd?: number | null; checked_at?: string;
+  stale?: boolean; gate: "clear" | "need_ack" | "blocked"; gate_reason: string | null; running?: boolean;
+}
+
 export interface JobState {
   id: string; title: string;
   /** site: "dcinside"(없던 작업도 이렇게 읽는다) | "blind". blind 는 no 가 글 주소의 별칭(문자열)이고 topic 은 블라인드 토픽 이름. */
@@ -37,6 +53,10 @@ export interface JobState {
   /** 구글 드라이브 보관 상태. status "done" 이면 드라이브로 옮겨져 고칠 수 없다. offline 은 드라이브를 읽을 수 없는 때. */
   archive?: { status: "done" | "error" | "skipped"; path?: string; at?: string; error?: string | null; warning?: string };
   offline?: boolean;
+  /** 사실 확인 정책 버전. 기능 이전 작업은 없거나 null. */
+  factcheck_policy?: number | null;
+  /** 읽기 단계의 사실 확인 결과(없으면 null). */
+  factcheck?: FactcheckView | null;
 }
 /** GET /api/storage */
 export interface Storage { enabled: boolean; found: boolean; root: string | null; folder: string | null; path: string | null; delete_local: boolean; free_bytes: number | null; total_bytes: number | null }
@@ -120,6 +140,8 @@ export interface AssetEntry {
   file: string; kind: "cap" | "ai" | string; status: string; src?: string; crop?: [number, number, number, number] | null; attachment?: number;
   needs_review?: boolean | null; review_reason?: string | null; recommend_regenerate?: boolean | null; blur_boxes?: number[][]; blurred?: boolean; hint?: string;
   sensitive?: SensitiveInfo;
+  /** role "news": 사실 확인 근거 기사 그림(뉴스 카드). 장면 편집기에서 "뉴스" 칩으로 보이고 가리기 단추는 없다. */
+  role?: string; fact_id?: string; outlet?: string; title?: string; source_url?: string; date?: string | null;
 }
 
 /** voice/timings.json 의 일부(미리 듣기·문장 구간). */

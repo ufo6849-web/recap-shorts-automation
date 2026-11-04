@@ -1,7 +1,7 @@
 // ?mock=1 — 백엔드 없이 화면을 볼 수 있게 하는 가짜 응답. 형식은 docs/03_v2_app_design.md 1.2 와 같고,
 // 이미지·소리·영상·대본·타임라인은 목 작업 폴더(아래 MEDIA)의 실제 파일을 /media/<폴더>/... 로 읽는다.
 import { ApiError } from "../apiError";
-import type { AssetEntry, BestResponse, BestTopic, Channel, GeminiModels, Health, ImageEngine, JobState, ModelFile, ModelRole, Scenes, ScriptDoc, Settings, SettingsGroup, SettingsKey, SettingsPatch, SfxFolder, Step, StepKey, StepStatus, TopicsResponse, VoiceTimings } from "../types";
+import type { AssetEntry, BestResponse, BestTopic, Channel, FactSource, FactcheckView, GeminiModels, Health, ImageEngine, JobState, ModelFile, ModelRole, Scenes, ScriptDoc, Settings, SettingsGroup, SettingsKey, SettingsPatch, SfxFolder, Step, StepKey, StepStatus, SubStep, TopicsResponse, VoiceTimings } from "../types";
 import { BEST, BEST_FIT, MADE_JOBS, TOPICS } from "./topics";
 import { mockLibraryFileUrl as libFileUrl, mockLibraryRequest, mockMemeSettings, mockSettle, mockSfxFolderOf, usedDirs } from "./library";
 
@@ -217,11 +217,74 @@ function makeJob(id: string, title: string, no: number, cur: StepKey | "all", st
   };
 }
 
+// ---- 사실 확인 목 작업: 시안(mockup.html)의 글·주장·출처를 그대로 쓴다. 읽기 단계에서 멈춰 있다(?mock=1 로 본다).
+//      출처 주소는 가짜(example.com)다. 언론사 이름만 시안에서 가져왔다. 뒤의 네 개(실패·다시 확인·결과 없음·확인 중)는 화면 상태 확인용이다. ----
+const FC_TOPIC: Partial<Record<string, { topic: string; source_text: string }>> = {};
+const FC_KEY_MSG = "사실 확인에는 OpenRouter 키가 필요합니다. 설정에서 넣어 주세요.";
+const fcSrc = (outlet: string, date: string | null): FactSource => ({ url: `https://example.com/mock/${encodeURIComponent(outlet)}`, title: `${outlet} 보도(가상)`, outlet, date });
+/** 기본값은 AI 판정 한 번의 모양(모델·검색·비용·시각). 건너뜀·실패는 필요한 값만 덮는다. */
+function fcRecord(p: Partial<FactcheckView> & Pick<FactcheckView, "status" | "gate" | "gate_reason" | "claims">): FactcheckView {
+  return { version: 1, kind: "info", forced: false, reason: "시사 글", error: null, overall_why: "", override: null, ack: null,
+    model: "anthropic/claude-opus-5.5", search: "exa:5", cost_usd: 0.08, checked_at: iso(7), stale: false, running: false, ...p };
+}
+const FC_STOP = fcRecord({ status: "stop", gate: "blocked", gate_reason: "사실 아님 판정이 있어 계속할 수 없습니다.", claims: [
+  { id: "C1", claim: "식약처가 2027년 1월부터 원유 50% 미만 가공유 판매를 전면 금지한다고 발표했다.", source_quote: "식약처가 2027년 1월부터 원유 함량 50% 미만 가공유는 판매를 전면 금지한다고 어제 발표함.", verdict: "false", fact: null,
+    why: "식약처는 원유 함량 표시 개선을 ‘검토’한다고 밝혔을 뿐, 판매 금지 발표는 보도에서 찾을 수 없습니다.", sources: [fcSrc("조선비즈", "2026-11-02"), fcSrc("축산신문", "2026-10-21")] },
+  { id: "C2", claim: "서울우유 흰우유도 원유가 40%밖에 들어가지 않는다.", source_quote: "서울우유 흰우유도 원유가 40%밖에 안 들어가서 같이 퇴출된다고 함.", verdict: "false", fact: null,
+    why: "흰우유는 원유 100%로 보도됐습니다. 40%는 가공유 평균 원유 함량(38.4%)과 섞인 수치로 보입니다.", sources: [fcSrc("연합뉴스", "2026-08-28"), fcSrc("매일일보", null)] },
+] });
+const FC_WARN = fcRecord({ status: "warn", gate: "need_ack", gate_reason: "주의 판정이라 자동 진행이 켜져 있어도 여기서 멈췄습니다.", claims: [
+  { id: "C1", claim: "가공유도 원유 함량을 앞면에 표시하는 쪽으로 간다.", source_quote: "가공유는 원유 함량을 전면에 표시해", verdict: "partly", fact: "식약처가 가공유 원유 함량 표시 개선을 검토하고 있다.",
+    why: "보도는 식약처가 표시 개선을 ‘검토’하는 단계라고 전합니다. 확정된 것은 아닙니다.", sources: [fcSrc("조선비즈", "2026-11-02")] },
+  { id: "C2", claim: "부산경남우유 가공유 12개 중 8개가 원유 0%다.", source_quote: "부산경남우유 · 12개 · 8개 (66.7%)", verdict: "partly", fact: "부산경남우유는 원유 0% 제품 비율이 높은 업체로 보도됐다.",
+    why: "원유 0% 제품 비율이 높다는 보도는 있지만 ‘12개 중 8개’는 보도에서 확인되지 않았습니다.", sources: [fcSrc("조선비즈", "2026-11-02")] },
+  { id: "C3", claim: "업계는 ‘분유도 우유 원료’라며 앞면 표시에 부담을 나타냈다.", source_quote: "", verdict: "true", fact: null,
+    why: "업계의 같은 해명이 보도됐습니다.", sources: [fcSrc("축산신문", "2026-10-21")] },
+] });
+const FC_SKIP = fcRecord({ status: "skipped", kind: "general", reason: "개인 경험담", gate: "clear", gate_reason: null, claims: [], model: null, cost_usd: null });
+const FC_FAIL = fcRecord({ status: "failed", gate: "blocked", gate_reason: FC_KEY_MSG, error: FC_KEY_MSG, claims: [], reason: null, kind: null, model: null, cost_usd: null });
+const FC_STALE = fcRecord({ status: "stop", stale: true, gate: "blocked", gate_reason: "글이 바뀌어 사실 확인을 다시 해야 합니다.", claims: FC_STOP.claims });
+const FC_MISSING: FactcheckView = { status: "missing", claims: [], gate: "blocked", gate_reason: "사실 확인 결과가 없습니다. 다시 확인해 주세요." };
+const FC_RUNNING: FactcheckView = { status: "missing", claims: [], gate: "blocked", gate_reason: "사실 확인이 끝나야 계속할 수 있습니다.", running: true };
+const FC_READ_OK: SubStep = { label: "글·그림 읽기", status: "done", note: "그림 5장" };
+/** 읽기 단계에서 멈춘 목 작업. 시안의 단계 표시(글·그림 읽기, 사실 확인)와 작업 기록을 쓴다. */
+function factJob(id: string, title: string, no: number, fc: FactcheckView, fcSub: SubStep, log: string[], topic?: { topic: string; source_text: string }): JobState {
+  const j = makeJob(id, title, no, "read", "waiting", 1, 9);
+  const read = j.steps.find((s) => s.key === "read")!;
+  read.detail = "끝났습니다.";
+  read.sub = [FC_READ_OK, fcSub];
+  j.log = log.map((msg, i) => ({ t: iso(9 - i * 0.5), msg }));
+  j.factcheck = fc;
+  j.factcheck_policy = 1;
+  if (topic) FC_TOPIC[id] = topic;
+  return j;
+}
+const FC_JOBS: JobState[] = [
+  factJob("mock_fc_stop", "[가상] 속보) 식약처, 내년부터 가공유 판매 전면 금지 확정", 475107, FC_STOP, { label: "사실 확인", status: "error", note: "사실 아님 2건" },
+    ["글 가져오기 끝 (4초)", "그림 5장 읽음", "시사 글로 분류, 주장 2개 확인 시작", "사실 확인: 중단 (사실 아님 2건)"],
+    { topic: "가공유 판매 금지 소식", source_text: "식약처가 2027년 1월부터 원유 함량 50% 미만 가공유는 판매를 전면 금지한다고 어제 발표함. 서울우유 흰우유도 원유가 40%밖에 안 들어가서 같이 퇴출된다고 함." }),
+  factJob("mock_fc_warn", "[가상] 원유 0%인데 우유라는 가공유의 정체", 475108, FC_WARN, { label: "사실 확인", status: "waiting", note: "확인 필요 2건" },
+    ["글 가져오기 끝 (4초)", "그림 5장 읽음", "시사 글로 분류, 주장 3개 확인 시작", "사실 확인: 주의 (일부 사실 2건)"],
+    { topic: "가공유 원유 함량 표시", source_text: "가공유는 원유 함량을 전면에 표시해 소비자 기만하는 행위를 없애는 방향으로 간다고함 [첨부 그림 2: 표] 부산경남우유 · 12개 · 8개 (66.7%) …" }),
+  factJob("mock_fc_skip", "[가상] 회식 노래방에서 팀장님이 마이크 안 놓은 썰", 475109, FC_SKIP, { label: "사실 확인", status: "todo", note: "일반 글이라 건너뜀" },
+    ["글 가져오기 끝 (4초)", "그림 5장 읽음", "일반 글로 분류 (개인 경험담)", "사실 확인 건너뜀"],
+    { topic: "회식 노래방 이야기", source_text: "어제 회식 2차로 노래방 갔는데 팀장님이 혼자 열 곡 부르심. 막내라 탬버린만 두 시간 쳤다. 손목 나갈 뻔함 ㅋㅋ" }),
+  factJob("mock_fc_fail", "[가상] 사실 확인이 실패한 글", 475110, FC_FAIL, { label: "사실 확인", status: "error", note: "실패" },
+    ["글 가져오기 끝 (4초)", "시사 글로 분류, 주장 2개 확인 시작", "사실 확인 실패"]),
+  factJob("mock_fc_stale", "[가상] 글을 고친 뒤 다시 확인이 필요한 글", 475111, FC_STALE, { label: "사실 확인", status: "todo", note: "다시 확인 필요" },
+    ["글 가져오기 끝 (4초)", "글 고침"]),
+  factJob("mock_fc_missing", "[가상] 확인 결과 파일이 없는 글", 475112, FC_MISSING, { label: "사실 확인", status: "todo", note: "결과 없음" },
+    ["글 가져오기 끝 (4초)"]),
+  factJob("mock_fc_run", "[가상] 사실 확인 중인 글", 475113, FC_RUNNING, { label: "사실 확인", status: "running", note: null },
+    ["글 가져오기 끝 (4초)", "사실 확인 시작"]),
+];
 // ---- 메모리 저장소 ----
+
 const jobs: JobState[] = [
   makeJob("mock_run", "[가상] 가게 벽 뜯었더니 삼십 년 전 편지가 나왔다", 1001, "voice", "running", 0.62, 6),
   makeJob("mock_script", "[가상] 벽 속 봉투 주인을 찾아 나선 가게", 1007, "script", "waiting", 1, 41),
   makeJob(REAL, "[가상] 삼십 년 된 편지의 주인은 같은 동네에 살았다", 1001, "review", "waiting", 1, 190),
+  ...FC_JOBS,
 ];
 const rate = new Map<string, number>([["mock_run", 0.012]]);
 let last = Date.now();
@@ -419,6 +482,10 @@ export async function mockRequest<T>(method: string, path: string, body?: unknow
     }
     if (sub === "/continue") {
       const w = j.steps.find((s) => s.status === "waiting");
+      const fc = j.factcheck;
+      // 서버처럼: 읽기가 막혀 있으면 사유를 그대로 409 로, 확인이 필요하면 확인 기록을 남기고 넘어간다.
+      if (w?.key === "read" && fc?.gate === "blocked") throw new ApiError(fc.gate_reason ?? "사실 확인이 막혀 있습니다", 409, { message: fc.gate_reason ?? "사실 확인이 막혀 있습니다" });
+      if (w?.key === "read" && fc?.gate === "need_ack") j.factcheck = { ...fc, ack: { at: new Date().toISOString() }, gate: "clear", gate_reason: null };
       if (w) { w.status = "done"; j.log.push({ t: new Date().toISOString(), msg: `${w.label} 확인` }); startNext(j); }
       j.status = statusOf(j.steps);
       return ok({ ok: true });
@@ -428,7 +495,16 @@ export async function mockRequest<T>(method: string, path: string, body?: unknow
       return ok(await getScript());
     }
     if (sub === "/script/refine") { await wait(300); return ok({ id: j.id, status: "running" }); }
-    if (sub === "/topic") return ok({ topic: "삼십 년 된 편지의 주인", source_text: "[가상] 오래된 가게를 고치던 목수가 벽 안에서 먼지 묻은 봉투 하나를 꺼냈다. 봉투에는 이름과 지금은 없는 골목 이름이 적혀 있었다.", tone_end: "" });
+    if (sub === "/topic") return ok(FC_TOPIC[j.id] ?? { topic: "삼십 년 된 편지의 주인", source_text: "[가상] 오래된 가게를 고치던 목수가 벽 안에서 먼지 묻은 봉투 하나를 꺼냈다. 봉투에는 이름과 지금은 없는 골목 이름이 적혀 있었다.", tone_end: "" });
+    // 사실 확인: 서버는 대기열에 넣지만 목은 같은 기록을 바로 돌려준다. 직접 확인은 막힌 판정을 넘긴다(서버 규칙 그대로).
+    if (sub === "/factcheck" && method === "POST") return ok(j.factcheck ?? null);
+    if (sub === "/factcheck/override" && method === "POST") {
+      const f = j.factcheck, note = String((body as { note?: unknown } | undefined)?.note ?? "").trim();
+      if (!f || (f.status !== "stop" && f.status !== "failed") || f.stale) throw new ApiError("이 판정은 직접 확인으로 넘길 수 없습니다", 400, { message: "이 판정은 직접 확인으로 넘길 수 없습니다" });
+      if (!note || note.length > 500) throw new ApiError("메모는 1~500자로 적어 주세요", 400, { message: "메모는 1~500자로 적어 주세요" });
+      j.factcheck = { ...f, override: { at: new Date().toISOString(), note }, gate: "clear", gate_reason: null };
+      return ok(j.factcheck);
+    }
     if (sub === "/assets") return ok(await getAssets());
     if (sub === "/assets/blur") {
       const b = body as { file: string; boxes: number[][] };

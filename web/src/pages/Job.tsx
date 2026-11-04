@@ -1,6 +1,7 @@
 import { Check, Copy, Pause, Play } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, fetchText, mediaUrl } from "../api";
+import FactCheckCard from "../components/FactCheckCard";
 import JobHeader from "../components/JobHeader";
 import Waveform, { loadBuffer } from "../components/Waveform";
 import { go, useCopy, useLoad } from "../hooks";
@@ -47,6 +48,10 @@ function NowCard({ job, step, onNext }: { job: JobState; step: Step; onNext: () 
   const shown = step.status === "done" || step.status === "waiting" ? 1 : step.progress;
   const act = async () => { setBusy(true); try { await onNext(); } finally { setBusy(false); } };
   const locked = isArchived(job);
+  // 읽기 단계: 사실 확인이 막았으면 넘기지 못하고, 확인이 필요하면 단추 이름이 "확인하고 계속"이 된다(11.7).
+  const fc = step.key === "read" ? job.factcheck : null;
+  const held = fc?.gate === "blocked" || !!fc?.running;
+  const gateMsg = fc && fc.gate !== "clear" ? fc.gate_reason : null;
   const title = step.status === "todo" ? `${step.label} — 차례를 기다리는 중` : step.label;
   return (
     <Card className="rise p-6">
@@ -75,11 +80,11 @@ function NowCard({ job, step, onNext }: { job: JobState; step: Step; onNext: () 
       )}
       {step.status === "waiting" && (
         <div className="mt-6 flex flex-wrap items-center gap-2 border-t border-line pt-5">
-          <span className="mr-auto text-[15px] font-medium">{({ read: "읽은 자료를 확인해 주세요.", script: "대본을 읽고 고칠 곳이 있는지 봐 주세요.", voice: "목소리를 들어 보고 어색한 문장은 다시 녹음하세요.", assets: "그림을 보고 바꿀 것이 있으면 바꿔 주세요.", scenes: "장면 편집기에서 그림 놓은 순서를 확인해 주세요.", review: "최종 영상을 보고 승인해 주세요." } as Record<string, string>)[step.key] ?? "확인하고 계속하세요."}</span>
+          <span className="mr-auto text-[15px] font-medium">{gateMsg ?? ({ read: "읽은 자료를 확인해 주세요.", script: "대본을 읽고 고칠 곳이 있는지 봐 주세요.", voice: "목소리를 들어 보고 어색한 문장은 다시 녹음하세요.", assets: "그림을 보고 바꿀 것이 있으면 바꿔 주세요.", scenes: "장면 편집기에서 그림 놓은 순서를 확인해 주세요.", review: "최종 영상을 보고 승인해 주세요." } as Record<string, string>)[step.key] ?? "확인하고 계속하세요."}</span>
           {step.key === "script" && <Button variant="secondary" disabled={locked} onClick={() => go(`${base}/script`)}>대본 편집</Button>}
           {(step.key === "scenes" || step.key === "voice" || step.key === "assets") && <Button variant="secondary" disabled={locked} onClick={() => go(`${base}/scenes`)}>{step.key === "assets" ? "이미지 바꾸기" : "장면 편집기 열기"}</Button>}
           {step.key === "review" ? <Button variant="primary" onClick={() => go(`${base}/review`)}>검수 화면으로</Button>
-            : <Button variant="primary" disabled={busy || locked} onClick={act}>이대로 계속</Button>}
+            : <Button variant="primary" disabled={busy || locked || held} onClick={act}>{fc?.gate === "need_ack" ? "확인하고 계속" : "이대로 계속"}</Button>}
         </div>
       )}
       {step.status === "error" && (
@@ -235,7 +240,7 @@ export default function Job({ id }: { id: string }) {
   const [sel, setSel] = useState<StepKey | null>(null);
   const [every, setEvery] = useState(1500);
   const { data: job, error, reload } = useLoad(() => api.job(id), [id], every);
-  useEffect(() => { if (job) setEvery(job.status === "running" ? 1500 : 6000); }, [job?.status]);  // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (job) setEvery(job.status === "running" || job.factcheck?.running ? 1500 : 6000); }, [job?.status, job?.factcheck?.running]);  // eslint-disable-line react-hooks/exhaustive-deps
   const hasScript = !!job?.artifacts.script;
   const script = useLoad(() => (hasScript ? api.script(id) : Promise.resolve(null)), [id, hasScript]);
 
@@ -251,6 +256,7 @@ export default function Job({ id }: { id: string }) {
       <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
         <div className="space-y-6">
           <NowCard job={job} step={step} onNext={async () => { await api.next(id); await reload(); }} />
+          {step.key === "read" && job.factcheck && <FactCheckCard job={job} fc={job.factcheck} onChanged={reload} />}
           {step.key === "read" && step.status !== "todo" && step.status !== "running" && <TopicCard job={job} />}
           <section>
             <SectionLabel>만들어진 것</SectionLabel>
