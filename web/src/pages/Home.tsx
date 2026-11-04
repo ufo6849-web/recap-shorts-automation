@@ -41,6 +41,9 @@ function JobCard({ job }: { job: JobState }) {
   );
 }
 
+/** 키가 하나도 없을 때의 이유(서버 문구와 같다). 키는 있는데 준비가 안 됐으면 그 이유를 카드에 보인다. */
+const NEED_KEY = "Gemini 또는 OpenRouter API 키가 필요합니다";
+
 export default function Home({ sheet }: { sheet: boolean }) {
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
@@ -49,6 +52,7 @@ export default function Home({ sheet }: { sheet: boolean }) {
   const health = useLoad(() => api.health(), [], 30000);
   const noKey = health.data?.gemini_key.ok === false;
   const badKey = !!health.data?.gemini_key.bad;
+  const reason = health.data?.gemini_key.detail;
 
   const valid = /^https?:\/\/\S+/.test(url.trim());
   async function start() {
@@ -72,10 +76,11 @@ export default function Home({ sheet }: { sheet: boolean }) {
           <Card className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-3 border-line-strong p-4 sm:flex-nowrap">
             <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-fill text-accent"><KeyRound size={18} {...ICON} /></span>
             <div className="min-w-0 flex-1">
-              <div className="text-[15px] font-semibold">{badKey ? "Gemini API 키가 맞지 않습니다." : "영상을 만들려면 Gemini API 키가 필요합니다."}</div>
+              <div className="text-[15px] font-semibold">{badKey ? "AI 키가 맞지 않습니다." : "영상을 만들려면 Gemini 또는 OpenRouter API 키가 필요합니다."}</div>
               <div className="mt-0.5 text-[13px] text-sub">{badKey
                 ? "연결 확인에서 키가 틀렸다고 나왔습니다. 맞는 키를 넣기 전에는 만들기가 꺼져 있습니다."
-                : "키를 넣기 전에는 만들기가 꺼져 있습니다. 키 하나만 넣으면 대본·목소리·그림까지 만듭니다."}</div>
+                : reason && reason !== NEED_KEY ? reason
+                : "키를 넣기 전에는 만들기가 꺼져 있습니다. 키 하나만 넣으면 영상을 만들 수 있습니다."}</div>
             </div>
             <Button variant="primary" onClick={() => go("/settings")} className="w-full shrink-0 sm:w-auto">{badKey ? "설정에서 키 확인" : "설정에서 키 넣기"}</Button>
           </Card>
@@ -85,7 +90,7 @@ export default function Home({ sheet }: { sheet: boolean }) {
             className="h-11 min-w-0 flex-1 rounded-[10px] bg-transparent px-3 text-[15px] text-ink outline-none placeholder:text-sub/70 focus-visible:outline-none" />
           <div className="flex gap-2">
             <Button type="button" variant="secondary" size="lg" icon={<Search size={17} {...ICON} />} onClick={() => go("/find")} className="flex-1 sm:flex-none">인기글에서 찾기</Button>
-            <Button type="submit" variant="primary" size="lg" disabled={!valid || busy || noKey} title={noKey ? (badKey ? "Gemini API 키를 확인하세요" : "Gemini API 키를 먼저 넣으세요") : undefined} className="flex-1 sm:flex-none">{busy ? "시작하는 중" : "만들기"}</Button>
+            <Button type="submit" variant="primary" size="lg" disabled={!valid || busy || noKey} title={noKey ? (badKey ? "AI 키를 확인하세요" : reason || NEED_KEY) : undefined} className="flex-1 sm:flex-none">{busy ? "시작하는 중" : "만들기"}</Button>
           </div>
         </form>
         {err && <div className="mt-2 text-[13px] text-bad-text">{err}</div>}

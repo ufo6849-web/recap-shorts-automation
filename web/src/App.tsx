@@ -12,7 +12,7 @@ import Settings from "./pages/Settings";
 import Library from "./pages/Library";
 
 const HEALTH: [keyof import("./types").Health, string][] = [
-  ["gemini_key", "Gemini"], ["cf_keys", "Clef"], ["image_server", "AI 그림"], ["ffmpeg", "ffmpeg"],
+  ["gemini_key", "AI 키"], ["cf_keys", "Clef"], ["image_server", "AI 그림"], ["ffmpeg", "ffmpeg"],
 ];
 
 function TopBar() {

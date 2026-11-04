@@ -11,12 +11,14 @@ const channelView = (): Channel => ({ ...channel, label: channel.main_topic === 
 
 // ---- 설정(계약서 §2~§5). 처음에는 Gemini 키가 없어서 홈 화면에 "키 넣기" 안내가 뜬다. ----
 const KEY_DEFS: [string, string, string, boolean, string][] = [
-  ["gemini_api_key", "Gemini API 키", "gemini", true, "RECAP_GEMINI_API_KEY"],
+  ["gemini_api_key", "Gemini API 키", "gemini", false, "RECAP_GEMINI_API_KEY"],
+  ["openrouter_api_key", "OpenRouter API 키", "openrouter", false, "RECAP_OPENROUTER_API_KEY"],
   ["cf_account_id", "Cloudflare 계정 ID", "cloudflare", false, "RECAP_CF_ACCOUNT_ID"],
   ["cf_api_token", "Cloudflare API 토큰", "cloudflare", false, "RECAP_CF_API_TOKEN"],
 ];
 const GROUP_DEFS: SettingsGroup[] = [
-  { id: "gemini", title: "Gemini", desc: "대본, 목소리, 첨부 그림 읽기, AI 그림(그림 만드는 곳이 Gemini 일 때). 이 키 하나만 있으면 영상을 만들 수 있습니다.", url: "https://aistudio.google.com/apikey" },
+  { id: "gemini", title: "Gemini", desc: "대본·그림 읽기·목소리·AI 그림. 이 키 하나로 전부 됩니다", url: "https://aistudio.google.com/apikey", need: "둘 중 하나 필수" },
+  { id: "openrouter", title: "OpenRouter", desc: "대본(Claude 등)·그림 읽기. Gemini 키가 없으면 Gemini 모델도 이 키로 부릅니다. 목소리는 로컬 엔진을 쓰세요", url: "https://openrouter.ai/settings/keys", need: "둘 중 하나 필수" },
   { id: "cloudflare", title: "Cloudflare (Clef)", desc: "실시간 베스트 주제 분류, AI 그림 글자 점검, 완성 영상 점검. 없으면 이 점검만 건너뜁니다.", url: "https://dash.cloudflare.com/profile/api-tokens" },
 ];
 const ENGINES: ImageEngine[] = [
@@ -31,7 +33,7 @@ const MODELS: ModelFile[] = [
     missing_effect: "없으면 로컬 목소리 엔진만 못 씁니다(기본은 Gemini 목소리)", env: false, job: null },
 ];
 const settingsState: { keys: Record<string, string>; image_engine: string; models: Record<string, string>; voice: { engine: string; gemini_voice: string; sid: number }; sfx: { fill_missing: boolean } } = {
-  keys: { gemini_api_key: "", cf_account_id: "", cf_api_token: "" },
+  keys: { gemini_api_key: "", openrouter_api_key: "", cf_account_id: "", cf_api_token: "" },
   image_engine: "gemini",
   models: {},
   voice: { engine: "gemini", gemini_voice: "Charon", sid: 0 },
@@ -46,7 +48,9 @@ const GEMINI_MODELS: GeminiModels = {
   source: "builtin", note: "Gemini 키가 없어 써 본 모델만 보여 줍니다",
   roles: {
     script: [{ id: "gemini-4-argon", label: "Gemini 4 Argon (gemini-4-argon) — 입력 $2 · 출력 $10 / 100만 토큰", recommended: true },
-      { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash (gemini-3.8-flash) — 입력 $0.75 · 출력 $3.75 / 100만 토큰", recommended: true }],
+      { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash (gemini-3.8-flash) — 입력 $0.75 · 출력 $3.75 / 100만 토큰", recommended: true },
+      { id: "anthropic/claude-opus-5.5", label: "Claude Opus 5.5 · OpenRouter", recommended: true },
+      { id: "anthropic/claude-sonnet-5.5", label: "Claude Sonnet 5.5 · OpenRouter", recommended: true }],
     tts: [{ id: "gemini-3.8-flash-tts", label: "Gemini 3.8 Flash TTS (gemini-3.8-flash-tts) — 입력 $0.5 · 음성 $9 / 100만 토큰", recommended: true },
       { id: "gemini-3.8-flash-lite-tts", label: "Gemini 3.8 Flash Lite TTS (gemini-3.8-flash-lite-tts)", recommended: true }],
     image: [{ id: "gemini-3.1-flash-image", label: "Nano Banana 2 (gemini-3.1-flash-image) — 장당 $0.067", recommended: true },
@@ -75,6 +79,14 @@ function mockInstall(id: string) {
 }
 const modelsView = () => ({ models: MODELS.map((m) => ({ ...m, job: m.job ? { ...m.job } : null })), setup_cmd: mockSetupCmd() });
 const maskedOf = (v: string) => (!v ? null : v.length >= 16 ? `••••${v.slice(-4)}` : "••••");
+/** 서버의 readiness() 흉내: AI 키(Gemini 또는 OpenRouter)가 하나라도 있으면 준비, 없으면 이유 한 줄. */
+const NEED_KEY = "Gemini 또는 OpenRouter API 키가 필요합니다";
+const readyReason = (): string | null => (settingsState.keys.gemini_api_key || settingsState.keys.openrouter_api_key ? null : NEED_KEY);
+/** health 의 gemini_key 자리: 준비되면 쓰는 키, 아니면 이유. */
+const keyDetail = (): string => {
+  const { gemini_api_key: g, openrouter_api_key: o } = settingsState.keys;
+  return g && o ? "Gemini·OpenRouter 키 있음" : g ? "Gemini 키로 부름" : o ? "OpenRouter 키로 부름(Gemini 키 없음)" : NEED_KEY;
+};
 function settingsView(): Settings {
   mockSettle();
   const keys: SettingsKey[] = KEY_DEFS.map(([name, label, group, required, env]) => {
@@ -83,7 +95,7 @@ function settingsView(): Settings {
   });
   return {
     file: "config/settings.local.json",
-    ready: !!settingsState.keys.gemini_api_key,
+    ready: readyReason() === null, ready_reason: readyReason(),
     keys, groups: GROUP_DEFS,
     image_engine: settingsState.image_engine,
     image_engines: ENGINES,
@@ -257,7 +269,7 @@ export async function mockRequest<T>(method: string, path: string, body?: unknow
   let m: RegExpMatchArray | null;
   const ok = (v: unknown) => JSON.parse(JSON.stringify(v ?? null)) as T;
   if (p === "/api/health") return ok({
-    gemini_key: { ok: !!settingsState.keys.gemini_api_key, detail: settingsState.keys.gemini_api_key ? "Gemini API 키 있음" : "Gemini API 키 없음 — 설정에서 넣으세요" },
+    gemini_key: { ok: readyReason() === null, detail: keyDetail() },
     cf_keys: { ok: true, detail: "Cloudflare 키 있음" }, gpu: { ok: false, detail: "GPU 없음" },
     image_server: { ok: false, detail: "AI 그림 꺼짐 — 캡처 카드만" },
     ffmpeg: { ok: true, detail: "ffmpeg 있음" },
@@ -284,6 +296,7 @@ export async function mockRequest<T>(method: string, path: string, body?: unknow
       const has = (...names: string[]) => names.every((n) => !!settingsState.keys[n]);
       if (!KEY_DEFS.some(([, , g]) => g === svc)) throw new ApiError("모르는 서비스입니다", 400, { message: "모르는 서비스입니다" });
       if (svc === "gemini") return ok({ service: svc, ok: has("gemini_api_key"), message: has("gemini_api_key") ? "연결됨" : "키가 없습니다" });
+      if (svc === "openrouter") return ok({ service: svc, ok: has("openrouter_api_key"), message: has("openrouter_api_key") ? "연결됨" : "키가 없습니다" });
       return ok({ service: svc, ok: has("cf_account_id", "cf_api_token"), message: has("cf_account_id", "cf_api_token") ? "연결됨 (Workers AI 사용 가능)" : has("cf_account_id") || has("cf_api_token") ? "계정 ID 와 토큰이 둘 다 필요합니다" : "키가 없습니다" });
     }
     if (method === "PUT") {
@@ -348,9 +361,9 @@ export async function mockRequest<T>(method: string, path: string, body?: unknow
   if (p === "/api/jobs" && method === "GET") return ok([...jobs].sort((a, b) => b.created_at.localeCompare(a.created_at)));
   if (p === "/api/jobs" && method === "POST") {
     const b = body as { url?: string; gallery?: string; no?: number; allow_duplicate?: boolean };
-    if (!settingsState.keys.gemini_api_key) {      // 서버와 같은 규칙: 키가 없으면 만들지 않는다(409 no_key)
-      throw new ApiError("Gemini API 키가 없어 만들 수 없습니다 — 오른쪽 위 '설정'에서 키를 넣으세요", 409,
-        { code: "no_key", message: "Gemini API 키가 없어 만들 수 없습니다 — 오른쪽 위 '설정'에서 키를 넣으세요" });
+    const reason = readyReason();
+    if (reason) {      // 서버와 같은 규칙: 준비가 안 되면 만들지 않는다(409 no_key, 문구는 준비 이유)
+      throw new ApiError(reason, 409, { code: "no_key", message: reason });
     }
     const no = b.no ?? (Number(/no=(\d+)/.exec(b.url ?? "")?.[1]) || 1001);
     const prior = MADE_JOBS[no];       // 서버처럼: 이미 만든 글이면 allow_duplicate 없이는 409

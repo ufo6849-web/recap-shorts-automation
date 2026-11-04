@@ -42,6 +42,7 @@ export interface JobState {
 export interface Storage { enabled: boolean; found: boolean; root: string | null; folder: string | null; path: string | null; delete_local: boolean; free_bytes: number | null; total_bytes: number | null }
 
 export interface HealthItem { ok: boolean; detail?: string; bad?: boolean }   // bad: 키는 있지만 연결 확인에서 틀렸다고 나옴
+/** gemini_key 는 'AI 키 준비' 상태다(이름은 화면 호환 때문에 그대로). ok = 준비됨, detail = 쓰는 키 또는 준비 안 된 이유. */
 export interface Health { gemini_key: HealthItem; cf_keys: HealthItem; gpu: HealthItem; image_server: HealthItem; ffmpeg: HealthItem; asr_model?: HealthItem }
 
 /** GET /api/topics — 실제 응답. triage 는 Clef 분류(없으면 null). category 는 {분야 라벨: 확률}. */
@@ -130,8 +131,8 @@ export interface SettingsKey {
   name: string; label: string; group: string; required: boolean;
   env: string; set: boolean; source: "env" | "file" | null; masked: string | null;
 }
-/** 키 묶음. url 은 "키 받는 곳". */
-export interface SettingsGroup { id: string; title: string; desc: string; url: string }
+/** 키 묶음. url 은 "키 받는 곳". need 는 묶음이 어떻게 필요한지 한 줄(예: "둘 중 하나 필수") — 있으면 "필수" 배지 대신 보인다. */
+export interface SettingsGroup { id: string; title: string; desc: string; url: string; need?: string }
 /** AI 그림 만드는 곳. auto·local·gemini·off. */
 export interface ImageEngine { id: string; label: string }
 /** 설정 화면에서 받는 중인 모델. got·total 은 바이트, 다 받으면 extracting(압축 푸는 중) → done. */
@@ -155,8 +156,10 @@ export interface GeminiModelChoice { id: string; label: string; recommended: boo
 export interface GeminiModels { source: "api" | "builtin"; note: string; roles: Record<string, GeminiModelChoice[]> }
 export interface Settings {
   file: string;
-  /** gemini_api_key 가 있으면 true — 영상을 만들 수 있는 최소 조건. */
+  /** AI 키(Gemini 또는 OpenRouter)가 준비되면 true — 영상을 만들 수 있는 최소 조건. */
   ready: boolean;
+  /** ready 가 false 면 이유 한 줄(한국어), 준비됐으면 null. */
+  ready_reason?: string | null;
   keys: SettingsKey[];
   groups: SettingsGroup[];
   image_engine: string;
@@ -188,7 +191,7 @@ export interface SettingsPatch {
   /** dirs 빈 목록·null = 기본 짤로 되돌림 */
   memes?: { dirs?: string[] | null };
 }
-/** POST /api/settings/test — service 는 묶음 id(gemini | cloudflare). */
+/** POST /api/settings/test — service 는 묶음 id(gemini | openrouter | cloudflare). */
 export interface SettingsTestResult { service: string; ok: boolean; message: string }
 
 /** POST /api/jobs/{id}/capcut — CapCut 초안으로 넘긴 결과. mode: native(그대로) | approx(비슷하게) | skipped(넣지 않음). */

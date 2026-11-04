@@ -76,6 +76,25 @@ python -m venv .venv
   npm run build
   ```
 
+### 리눅스에서 실행 (칼리 등)
+
+Windows 의 `setup.ps1` 대신 아래 순서로 씁니다. 글 캡처는 설치된 Edge 가 있으면 Edge 를, 없으면 Playwright Chromium 을 씁니다.
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-app.txt -r requirements-render.txt -r requirements-voice.txt
+python -m playwright install chromium
+cd web && npm ci && npm run build && cd ..
+python scripts/setup_models.py --all
+python -m recap_shorts.app
+```
+
+- `python -m playwright install chromium` 이 시스템 라이브러리 오류로 안 되면 `python -m playwright install --with-deps chromium` 을 씁니다(sudo 암호를 묻습니다).
+- ffmpeg 이 PATH 에 있어야 합니다(데비안·칼리: `sudo apt install ffmpeg`). 화면 빌드에는 Node.js 20 이상이 필요합니다.
+- 앱 주소는 http://127.0.0.1:8020 입니다.
+- **OpenRouter 키만으로 쓰기** (Gemini 키 없이): 설정에서 **OpenRouter API 키** 를 넣고, 대본은 **Claude Opus 5.5 · OpenRouter** 를 고릅니다. 목소리는 **로컬 목소리(Supertonic)**, AI 그림은 **AI 그림 안 만듦** 으로 둡니다. Gemini 키가 없으면 목소리와 AI 그림의 기본값도 이 값입니다(설정에서 다르게 고르면 그대로 따릅니다). 그림 읽기와 가림 판단은 OpenRouter 의 Gemini 3.8 Flash 가 맡습니다.
+
 ### 2. 키와 설정
 
 키는 **앱 화면의 설정**에서 넣습니다. 값은 `config/settings.local.json` 에 저장되고, 이 파일은 git 에 들어가지 않습니다(`.gitignore`). 키 값은 화면·로그·저장소 어디에도 남기지 않습니다(화면에는 가린 값만 보이고, 16자 이상이면 끝 4자만 보입니다).
