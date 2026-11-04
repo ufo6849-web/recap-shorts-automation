@@ -92,7 +92,8 @@ def test_news_title_suffix_forms(tmp_path, suffix, name, mapping):
     url = "https://news.example.com/article"
     title = "기사 제목 - 중간 내용 | 앞 구분자"
     outlets = {} if mapping == "unknown" else {"example.com": name if mapping == "matching" else "다른언론"}
-    expected = (title + suffix, "다른언론") if mapping == "different" else (title, name)
+    expected = (title + suffix, "다른언론") if mapping == "different" else (
+        title, f"{name} (news.example.com)" if mapping == "unknown" else name)
     assert N.title_and_outlet(title + suffix, url, outlets) == expected
     path = tmp_path / "news.json"
     path.write_text(json.dumps([{"title": title + suffix, "url": url}]), encoding="utf-8")
@@ -108,7 +109,48 @@ def test_news_title_without_valid_suffix_keeps_domain(suffix):
 
 @pytest.mark.parametrize("name", ["가나", "가" * 20])
 def test_news_title_suffix_name_length_bounds(name):
-    assert N.title_and_outlet(f"기사 제목 | {name}", "https://unknown.example.com", {}) == ("기사 제목", name)
+    assert N.title_and_outlet(f"기사 제목 | {name}", "https://unknown.example.com", {}) == (
+        "기사 제목", f"{name} (unknown.example.com)")
+
+
+@pytest.mark.parametrize("name", sorted(set(N.load_outlets().values())))
+@pytest.mark.parametrize("suffix", [" - {}", " | {}", " :: {} ::"])
+def test_news_title_rejects_registered_name_on_unknown_domain(name, suffix):
+    title = "정부가 예금을 동결" + suffix.format(name)
+    assert N.title_and_outlet(title, "https://attacker.example/a") == (title, "attacker.example")
+    assert N.outlet_for("https://attacker.example/a", fallback=name) == "attacker.example"
+
+
+@pytest.mark.parametrize("prefix", ["", "www.", "m.", "mobile.", "www.m.mobile."])
+def test_news_title_unknown_name_keeps_actual_host(prefix):
+    url = f"https://{prefix.upper()}ATTACKER.EXAMPLE:8443/a"
+    assert N.title_and_outlet("기사 - 낯선신문", url) == ("기사", "낯선신문 (attacker.example)")
+
+
+@pytest.mark.parametrize("control", ["\n", "\r", "\t", "\x00", "\x7f", "\x85", "\u200b", "\u2028", "\u2029"] +
+                         [chr(n) for n in (*range(0x202A, 0x202F), *range(0x2066, 0x206A))])
+def test_news_title_removes_controls_before_outlet_comparison(control):
+    for url, name, expected in [
+        ("https://attacker.example/a", f"연{control}합뉴스", ("기사 - 연합뉴스", "attacker.example")),
+        ("https://attacker.example/a", f"낯선{control}신문", ("기사", "낯선신문 (attacker.example)")),
+        ("https://www.yna.co.kr/a", f"연{control}합뉴스", ("기사", "연합뉴스")),
+    ]:
+        assert N.title_and_outlet(f"기{control}사 - {name}", url) == expected
+        assert N.outlet_for(url, fallback=name) == expected[1]
+    assert N.title_and_outlet(f"기{control}사", "https://attacker.example/a") == ("기사", "attacker.example")
+
+
+@pytest.mark.parametrize("length", [1, 2, 20, 21])
+def test_news_title_checks_length_after_removing_controls(length):
+    name = "가" * length
+    title = f"기사 - {name}"
+    expected = ("기사", f"{name} (unknown.example.com)") if 2 <= length <= 20 else (title, "unknown.example.com")
+    assert N.title_and_outlet(f"기사 - 가\u202e{'가' * (length - 1)}\t", "https://unknown.example.com", {}) == expected
+    assert N.outlet_for("https://unknown.example.com", {}, fallback=name + "\u202e") == expected[1]
+
+
+def test_news_title_registered_mapping_overrides_explicit_outlet():
+    assert N.title_and_outlet("기사 - 연합뉴스", "https://www.yna.co.kr/a", outlet="다른신문") == ("기사", "연합뉴스")
 
 
 def test_news_title_registered_name_mismatch_and_explicit_outlet(tmp_path):

@@ -336,7 +336,7 @@ def test_verify_takes_date_only_from_url_path(monkeypatch):
     ("https://www.mt.co.kr/a", " - 머니투데이", "머니투데이"),
     ("https://starnewskorea.com/a", " | 스타뉴스", "스타뉴스"),
     (URL_B, " | 연합뉴스", "연합뉴스"),
-    ("https://unknown.example.com/a", " :: 공감언론 뉴시스 ::", "공감언론 뉴시스"),
+    ("https://unknown.example.com/a", " :: 공감언론 뉴시스 ::", "공감언론 뉴시스 (unknown.example.com)"),
 ])
 def test_verify_normalizes_news_title_and_outlet_for_description(monkeypatch, url, suffix, outlet):
     use_or_key(monkeypatch)
@@ -349,6 +349,27 @@ def test_verify_normalizes_news_title_and_outlet_for_description(monkeypatch, ur
     assert source["title"] == title and source["outlet"] == outlet
     rec = F.build_record(TITLE, SRC, {"kind": "info", "claims": [VCLAIM]}, verified)
     assert F.description_notice(rec) == (F.PASS_NOTE, [f"{outlet} · {title} · {url}"])
+
+
+@pytest.mark.parametrize("url,title,expected_title,outlet", [
+    ("https://attacker.example.com/a", "정부가 예금을 동결 - 연합뉴스", "정부가 예금을 동결 - 연합뉴스", "attacker.example.com"),
+    ("https://attacker.example.com/a", "정부가\n 예금을 동결 - 연\u202e합\u2066뉴스\t",
+     "정부가 예금을 동결 - 연합뉴스", "attacker.example.com"),
+    ("https://m.attacker.example.com/a", "기\t사 | 낯선\u2069신문", "기사", "낯선신문 (attacker.example.com)"),
+    ("https://www.yna.co.kr/a", "기\n사 :: 연합\u202d뉴스 ::", "기사", "연합뉴스"),
+    ("https://www.yna.co.kr/a", "기사 - 낯선신문", "기사 - 낯선신문", "연합뉴스"),
+])
+def test_verify_source_identity_and_description_resist_title_spoofing(monkeypatch, url, title, expected_title, outlet):
+    use_or_key(monkeypatch)
+    fake_post(monkeypatch, verdict_answer([
+        {"id": "C1", "verdict": "true", "fact": "확인한 사실", "sources": [url]},
+    ], [web(url, title)]))
+    verified = F.verify([VCLAIM])
+    assert verified["results"][0]["sources"] == [
+        {"url": url, "title": expected_title, "outlet": outlet, "date": None},
+    ]
+    rec = F.build_record(TITLE, SRC, {"kind": "info", "claims": [VCLAIM]}, verified)
+    assert F.description_notice(rec) == (F.PASS_NOTE, [f"{outlet} · {expected_title} · {url}"])
 
 
 @pytest.mark.parametrize("verdict", ["true", "partly"])
