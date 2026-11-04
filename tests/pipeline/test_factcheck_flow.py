@@ -393,9 +393,12 @@ def test_script_check_deletes_false_sentence_and_waits_even_in_auto(tmp_path):
         assert [f["verdict"] for f in chk["factcheck_flags"]] == ["false"]
         assert chk["deleted"][-1]["index"] == 1 and "사실 확인" in chk["deleted"][-1]["reason"]
         assert any(x.startswith("사실 확인: ") for x in chk["flags"])
+        # 가드가 C1 의 source_quote 와 같은 근거를 쓴 문장 0 을 먼저 지우고, 대본 뒤 검사가 문장 1 을 지운다(두 방어 모두 동작).
+        assert any("사실 아님 주장(C1)" in x for x in chk["flags"])
         script = json.loads((job.dir / "script_final/script.json").read_text(encoding="utf-8"))
-        assert len(script["sentences"]) == len(DRAFT["sentences"]) - 1
+        assert len(script["sentences"]) == len(DRAFT["sentences"]) - 2
         assert chk["deleted"][-1]["text"] not in [s["text"] for s in script["sentences"]]
+        assert DRAFT["sentences"][0]["text"] not in [s["text"] for s in script["sentences"]]
 
 
 def test_script_check_flags_unverified_without_deleting(tmp_path):
