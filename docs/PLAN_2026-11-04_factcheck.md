@@ -360,6 +360,11 @@ def date_from_url(url: str) -> str | None                # /2026/11/02/ 또는 2
 - **`arrange`:**
   - `kind_of`는 role이 `news`면 `"news"`를 돌려준다.
   - `heuristic_scores`에서 news 그림은 문장 `evidence`와 그림 `fact_text`가 `normalize_loose` 기준으로 같거나 한쪽이 다른 쪽을 품으면 0.95, 아니면 0.0이다.
+  - **2026-11-04 22:20 개정(리뷰 Sol 중간 지적에 대한 메인 판정):** 위 규칙만으로는 실제 글(e2e A2)에서 카드가 한 번도 놓이지 않았다. 대본 evidence가 원문 문장을 그대로 옮기기 때문에 기사에서 나온 `fact`와 포함 관계가 거의 생기지 않는다. 그래서 다음처럼 바꾼다.
+    - 포함 관계면 0.95(그대로)다. 아니면 문장과 그 기사의 사실 전부(`fact_texts`)·제목의 글자 묶음 겹침이 0.3 이상일 때 0.5~0.85, 미만이면 0.0이다. 훅 문장에는 놓지 않는다.
+    - 카드가 하나도 놓이지 않았으면 겹침이 0.15를 넘는 가장 높은 문장 하나에 보정 배치한다(`pipeline._ensure_news_card`).
+    - Clef 점수를 섞을 때 news 카드는 섞지 않는다(규칙 점수의 0은 0으로 남는다).
+    - 되돌리려면 겹침 점수와 보정 배치를 끄면 된다. 그러면 카드는 대부분 영상에 나오지 않는다.
   - `off_script`는 news를 빼지 않는다. `assign`·`plan_with_ai_cap`은 news를 cap처럼 센다.
 - **`sensitive`:** role이 `news`면 검사하지 않는다.
 - **`guard.run_guard`:** 본문 문장의 evidence가 `topic["false_claims"][].source_quote`와 겹치면(정규화 후 6자 이상이 한쪽이 다른 쪽에 들어감) 그 문장을 지운다. 지운 사실은 `deleted`에 남기고, `flags`에 "사실 확인: 사실 아님 주장(C2)과 같은 근거라 문장 n 삭제"를 더한다.
