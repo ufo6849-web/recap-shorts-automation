@@ -545,8 +545,11 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
         return topic_checks.status()
 
     @app.post("/api/topics/factcheck/cancel", dependencies=[Depends(local_only)])
-    def topics_fc_cancel():
-        return topic_checks.cancel()
+    def topics_fc_cancel(body: dict | None = Body(None)):
+        try:
+            return topic_checks.cancel((body or {}).get("run_id"))
+        except topic_fc.Conflict as e:
+            raise HTTPException(409, str(e)) from None
 
     def fit_views(items: list[dict], hide_unfit: bool) -> tuple[list[dict], dict]:
         """채널 대주제 맞춤 점수. 글 모델 키(Gemini 나 OpenRouter)가 하나도 없으면 부르지 않고 목록만 원래 순서로 보여 준다

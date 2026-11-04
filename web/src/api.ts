@@ -53,7 +53,7 @@ export const api = {
     req<TopicFcEstimate>("POST", "/api/topics/factcheck/estimate", { source, nos, force }),
   topicFcRun: (run_id: string) => req<{ started: boolean; total: number; run_id: string }>("POST", "/api/topics/factcheck/run", { run_id }),
   topicFcStatus: () => req<TopicFcStatus>("GET", "/api/topics/factcheck/status"),
-  topicFcCancel: () => req<TopicFcStatus>("POST", "/api/topics/factcheck/cancel"),
+  topicFcCancel: (run_id: string) => req<TopicFcStatus>("POST", "/api/topics/factcheck/cancel", { run_id }),
   createJob: (b: CreateJobBody) => req<{ id: string }>("POST", "/api/jobs", b),
   jobs: () => req<JobState[]>("GET", "/api/jobs"),
   job: (id: string) => req<JobState>("GET", `/api/jobs/${id}`),

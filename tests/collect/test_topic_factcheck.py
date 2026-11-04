@@ -264,8 +264,8 @@ def test_concurrent_start_and_idempotent_cancel(env):
             results = list(pool.map(lambda _: start(), range(2)))
         assert results.count("conflict") == 1
         assert entered.wait(5)
-        assert service.cancel()["state"] == "cancelling"
-        assert service.cancel()["state"] == "cancelling"
+        assert service.cancel(estimate["run_id"])["state"] == "cancelling"
+        assert service.cancel(estimate["run_id"])["state"] == "cancelling"
         with pytest.raises(T.Conflict):
             service.start(estimate["run_id"])
     finally:
@@ -273,7 +273,7 @@ def test_concurrent_start_and_idempotent_cancel(env):
         service.thread.join(5)
     assert service.status()["done"] == 1
     assert service.status()["stop_reason"] == "cancelled"
-    assert service.cancel()["state"] == "stopped"
+    assert service.cancel(estimate["run_id"])["state"] == "stopped"
 
 
 def test_run_id_expiry_and_missing_key(env):
@@ -918,3 +918,102 @@ def test_normal_classification_settlement_failure_retries(env, monkeypatch):
     assert service.status()["error"] is None
     assert service._budget()[1] == pytest.approx(.1)
     assert service.status()["cost_usd"] == 0
+
+
+@pytest.mark.parametrize("source", ["dcbest", "blind"])
+@pytest.mark.parametrize("stale", [False, True])
+def test_status_results_match_annotate_without_external_work(env, monkeypatch, source, stale):
+    service, now = env
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def verify(*args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 2:
+            raise RuntimeError("항목 판정 실패")
+        if len(calls) == 3:
+            entered.set()
+            assert release.wait(5)
+        return answer("false")
+
+    service.verify = verify
+    quoted = service.estimate(source, rows(4))
+    try:
+        service.start(quoted["run_id"])
+        assert entered.wait(5)
+        # 실행용 스냅샷은 견적 보관함/목록 TTL과 독립적이다.
+        service.snapshots.clear()
+        now[0] += 25 * 3600 if stale else 700
+        # 아직 판정 전인 항목과 기록 없는 항목은 결과에 포함되지 않는다.
+        T._path(service.cache, source, 4).unlink()
+        listed = rows(4)
+        service.annotate(source, listed)
+        expected = [{"no": item["no"], "fc": item["fc"]} for item in listed[:2]]
+
+        def forbidden(*args, **kwargs):
+            pytest.fail("상태 결과 조회는 분류·판정·장부를 부르면 안 됨")
+
+        with monkeypatch.context() as guard:
+            for name in ("llm", "verify", "_budget", "_reserve", "_settle", "annotate"):
+                guard.setattr(service, name, forbidden)
+            for _ in range(2):
+                state = service.status()
+                assert state["state"] == "running" and state["done"] == 2
+                assert state["results"] == expected
+                assert all(r["fc"]["expired"] is stale for r in state["results"])
+        service.cancel(quoted["run_id"])
+    finally:
+        release.set()
+        service.thread.join(5)
+    # 마지막 저장 결과까지, 목록을 다시 받지 않고도 상태에서 읽는다.
+    final = service.status()
+    listed = rows(3)
+    service.annotate(source, listed)
+    assert final["results"] == [{"no": item["no"], "fc": item["fc"]} for item in listed]
+    assert final["done"] == 3
+
+
+def test_status_idle_results_empty_after_restart(env, monkeypatch):
+    service, _ = env
+    run(service, service.estimate("dcbest", rows()))
+    assert service.status()["results"]
+    restarted = T.TopicFactcheck(service.cache)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("idle 결과 조회는 외부 작업을 부르면 안 됨")
+
+    for name in ("llm", "verify", "_budget", "_reserve", "_settle", "ready"):
+        monkeypatch.setattr(restarted, name, forbidden)
+    assert restarted.status()["state"] == "idle"
+    assert restarted.status()["results"] == []
+
+
+def test_cancel_rejects_missing_or_other_run_without_state_change(env):
+    service, _ = env
+    old = service.estimate("dcbest", rows())
+    run(service, old)
+    quoted = service.estimate("blind", rows(2))
+    entered, release = threading.Event(), threading.Event()
+
+    def verify(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return answer()
+
+    service.verify = verify
+    try:
+        service.start(quoted["run_id"])
+        assert entered.wait(5)
+        before = service.status()
+        for run_id in (None, "", "other-run", old["run_id"]):
+            with pytest.raises(T.Conflict, match="다른 판정 실행이라 멈추지 않았습니다"):
+                service.cancel(run_id)
+            assert service.status() == before
+            assert not service.cancelled.is_set()
+        with pytest.raises(T.Conflict):
+            service.cancel()
+        assert service.cancel(quoted["run_id"])["state"] == "cancelling"
+        assert service.cancelled.is_set()
+    finally:
+        release.set()
+        service.thread.join(5)

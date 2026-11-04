@@ -40,7 +40,8 @@ def app_env(tmp_path, monkeypatch):
     service.llm = lambda *args: calls.append(args) or {"items": [{"i": 1, "kind": "news"}]}
     service.verify = lambda *a, **k: {"results": [{"id": "C1", "verdict": "unverified", "sources": [], "why": "미확인"}], "cost_usd": .06}
     yield app, service, calls
-    service.cancel()
+    if service._state["run_id"]:
+        service.cancel(service._state["run_id"])
     if service.thread:
         service.thread.join(5)
         assert not service.thread.is_alive()
@@ -127,10 +128,10 @@ def test_unit_run_status_and_cancel_conflict(app_env):
             endpoint(app, PREFIX + "/run")({"run_id": quoted["run_id"]})
         assert exc.value.status_code == 409
         state = endpoint(app, PREFIX + "/status")()
-        assert set(state) == {"run_id", "source", "state", "done", "total", "cost_usd", "stop_reason", "error"}
+        assert set(state) == {"run_id", "source", "state", "done", "total", "cost_usd", "stop_reason", "error", "results"}
         assert state["run_id"] == quoted["run_id"] and state["state"] == "running"
         for _ in range(2):
-            assert endpoint(app, PREFIX + "/cancel")()["state"] == "cancelling"
+            assert endpoint(app, PREFIX + "/cancel")({"run_id": quoted["run_id"]})["state"] == "cancelling"
     finally:
         release.set()
         service.thread.join(5)
@@ -177,7 +178,7 @@ def test_http_roundtrip(app_env):
         service.thread.join(5)
         state = client.get(PREFIX + "/status").json()
         assert state["state"] == "done" and state["done"] == 1
-        assert client.post(PREFIX + "/cancel").status_code == 200
+        assert client.post(PREFIX + "/cancel", json={"run_id": quoted["run_id"]}).status_code == 200
         assert client.post(PREFIX + "/run", json={"run_id": "missing"}).status_code == 409
 
 
@@ -258,14 +259,14 @@ def test_http_late_settlement_error_status_and_recovery(app_env, monkeypatch):
                 response = client.get(PREFIX + "/status")
                 assert response.status_code == 200
                 assert response.json()["error"] == T.LEDGER_NOTE
-                assert set(response.json()) == {"run_id", "source", "state", "done", "total", "cost_usd", "stop_reason", "error"}
+                assert set(response.json()) == {"run_id", "source", "state", "done", "total", "cost_usd", "stop_reason", "error", "results"}
                 assert "비밀값" not in response.text
             annotated = client.get("/api/topics", params={"source": "dcbest"})
             assert annotated.status_code == 200 and annotated.json()["fc_ready"] is False
             assert annotated.json()["fc_note"] == T.LEDGER_NOTE
             assert client.post(PREFIX + "/estimate", json=body).status_code == 409
             assert client.post(PREFIX + "/run", json={"run_id": "missing"}).status_code == 409
-            assert client.post(PREFIX + "/cancel").status_code == 200
+            assert client.post(PREFIX + "/cancel").status_code == 409
             with pytest.raises(T.Conflict):
                 T._FileLock(service.cache / "_fc_run.lock", blocking=False)
             monkeypatch.setattr(service, "_settle", original)
@@ -278,3 +279,54 @@ def test_http_late_settlement_error_status_and_recovery(app_env, monkeypatch):
     finally:
         release.set()
         thread.join(5)
+
+
+def test_http_cancel_requires_matching_run_id_without_state_change(app_env):
+    app, service, _ = app_env
+    entered, release = threading.Event(), threading.Event()
+    original = service.verify
+
+    def verify(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return original(*args, **kwargs)
+
+    service.verify = verify
+    with TestClient(app, client=("127.0.0.1", 50000), base_url="http://localhost") as client:
+        client.get("/api/topics", params={"source": "dcbest"})
+        quoted = client.post(PREFIX + "/estimate", json={"source": "dcbest", "nos": [1]}).json()
+        try:
+            assert client.post(PREFIX + "/run", json={"run_id": quoted["run_id"]}).status_code == 200
+            assert entered.wait(5)
+            before = client.get(PREFIX + "/status").json()
+            for kwargs in ({}, {"json": {}}, {"json": {"run_id": None}}, {"json": {"run_id": "other"}}):
+                response = client.post(PREFIX + "/cancel", **kwargs)
+                assert response.status_code == 409
+                assert "다른 판정 실행이라 멈추지 않았습니다" in response.text
+                assert client.get(PREFIX + "/status").json() == before
+                assert not service.cancelled.is_set()
+            response = client.post(PREFIX + "/cancel", json={"run_id": quoted["run_id"]})
+            assert response.status_code == 200 and response.json()["state"] == "cancelling"
+        finally:
+            release.set()
+            service.thread.join(5)
+
+
+def test_unit_status_results_do_not_refetch_expired_list(app_env, monkeypatch):
+    app, service, _ = app_env
+    listing(app)
+    quoted = estimate(app)
+    endpoint(app, PREFIX + "/run")({"run_id": quoted["run_id"]})
+    service.thread.join(5)
+    expected = listing(app)["items"][0]["fc"]
+    now = service.clock()
+    service.clock = lambda: now + 700
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("상태 조회 중 수집·분류·판정 호출 금지")
+
+    monkeypatch.setattr(dcbest, "fetch_best", forbidden)
+    monkeypatch.setattr(blind, "fetch_best", forbidden)
+    service.llm = service.verify = forbidden
+    result = endpoint(app, PREFIX + "/status")()
+    assert result["results"] == [{"no": 1, "fc": expected}]

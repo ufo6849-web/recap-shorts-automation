@@ -33,27 +33,25 @@ const STOP_NOTES: Record<string, string> = {
   storage_error: "판정 기록 또는 비용 장부를 처리하지 못했습니다",
 };
 type FcCounts = { bad: number; warn: number; outline: number; ok: number; failed: number };
-function countResults(items: BestTopic[], nos: (string | number)[]): FcCounts {
+function countResults(items: TopicFcStatus["results"]): FcCounts {
   const counts = { bad: 0, warn: 0, outline: 0, ok: 0, failed: 0 };
-  const selected = new Set(nos.map(String));
   for (const item of items) {
     const chip = liveChip(item.fc);
-    if (chip && selected.has(String(item.no))) counts[item.fc?.status === "failed" ? "failed" : chip.color]++;
+    if (chip) counts[item.fc?.status === "failed" ? "failed" : chip.color]++;
   }
   return counts;
 }
 type FcSession = { estimate: TopicFcEstimate; nos: (string | number)[]; force: boolean; excluded: string[]; status: TopicFcStatus | null;
-  counts: FcCounts; awaitingList: boolean; view: { sort: BestSort; hours: number; pages: number } };
+  counts: FcCounts; view: { sort: BestSort; hours: number; pages: number } };
 // 같은 탭에서 목록을 닫거나 출처를 바꿨다가 돌아와도 자신이 시작한 실행만 이어서 조회한다.
 const fcSessions: Partial<Record<TopicSource, FcSession>> = {};
 
 function useTopicCheck(source: TopicSource, data: BestResponse | null, setData: (d: BestResponse) => void,
-  sort: BestSort, hours: number, pages: number, visible: BestTopic[]) {
+  sort: BestSort, hours: number, pages: number, visible: BestTopic[], listChanging: boolean) {
   const [session, setSessionState] = useState<FcSession | null>(() => fcSessions[source] ?? null);
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
-  const [syncNote, setSyncNote] = useState<string | null>(null);
   const alive = useRef(true);
   const request = useRef(0);
   const setSession = useCallback((v: FcSession | null) => {
@@ -68,61 +66,45 @@ function useTopicCheck(source: TopicSource, data: BestResponse | null, setData: 
     // 새 견적 자체는 무효화하지 않는다.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleKey, data?.fetched_at, sort, hours, pages, setSession]);
-  const current = useRef({ data, sort, hours, pages });
-  current.current = { data, sort, hours, pages };
+  // 목록이 늦게 도착하거나 다시 열려도 같은 출처의 보관 결과를 적용한다.
+  const appliedStatus = useRef<TopicFcStatus | null>(null);
   useEffect(() => {
-    // 탭 재진입 시 terminal status보다 늦게 온 목록도 완료 요약에 반영한다.
-    if (data && session?.awaitingList && data.sort === session.view.sort && data.hours === session.view.hours
-      && (source === "blind" || data.pages === session.view.pages)) {
-      setSession({ ...session, counts: countResults(data.items, session.nos), awaitingList: false });
-      setSyncNote((note) => note === "목록을 불러오면 판정 칩을 확인할 수 있습니다." ? null : note);
-    }
-    // 새 목록 응답에만 반응한다. 진행 상태 변경만으로 저장된 집계를 덮지 않는다.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, source, setSession]);
+    const status = session?.status;
+    if (!data || data.source !== source || status?.source !== source || status.run_id !== session?.estimate.run_id || appliedStatus.current === status) return;
+    // 한 응답은 한 번 적용한다. 이후 수동 새로고침의 최신 판정을 과거 응답으로 덮지 않는다.
+    appliedStatus.current = status;
+    const results = new Map(status.results.map((r) => [String(r.no), r.fc]));
+    let changed = false;
+    const items = data.items.map((item) => {
+      const fc = results.get(String(item.no));
+      if (!fc || item.fc === fc) return item;
+      changed = true;
+      return { ...item, fc };
+    });
+    if (changed) setData({ ...data, items, fc_counts: {
+      news: items.filter((t) => t.fc && t.fc.kind !== "general").length,
+      checked: items.filter((t) => t.fc && t.fc.kind !== "general" && t.fc.status && t.fc.status !== "failed" && !t.fc.expired).length,
+      doubt: items.filter((t) => liveChip(t.fc)?.color === "bad").length,
+    } });
+  }, [data, session?.status, session?.estimate.run_id, source, setData]);
 
   const running = activeRun(session?.status);
   useEffect(() => {
     if (!session || !running) return;
     let dead = false;
     let timer: number | undefined;
-    let syncedDone = -1;
-    let counts = session.counts;
-    let awaitingList = session.awaitingList;
     const poll = async () => {
       try {
         const status = await api.topicFcStatus();
         if (dead) return;
         if (status.run_id !== session.estimate.run_id || status.source !== source) {
           setMessage(status.state === "idle" ? "서버의 실행 상태가 초기화되었습니다. 목록을 새로 불러와 주세요." : "다른 판정 실행으로 상태가 바뀌었습니다. 목록을 새로 불러와 주세요.");
-          setSession({ ...session, status: { ...session.status!, state: "stopped" } });
+          const latest = fcSessions[source] ?? session;
+          setSession({ ...latest, status: { ...latest.status!, state: "stopped" } });
           return;
         }
-        if (syncedDone !== status.done || !activeRun(status)) {
-          const view = current.current;
-          // GET도 TTL(600초)이 지나면 수집한다. fetched_at 기준 1분 여유를 두고 자동 GET을 중단한다.
-          const fetched = Date.parse(view.data?.fetched_at ?? "");
-          if (!view.data) {
-            awaitingList = true;
-            setSyncNote("목록을 불러오면 판정 칩을 확인할 수 있습니다.");
-          } else if (!Number.isFinite(fetched) || Date.now() - fetched >= 540_000 || fetched > Date.now()) {
-            setSyncNote("목록 캐시가 만료되어 칩 자동 갱신을 멈췄습니다. 새로 불러오기를 눌러 결과를 확인해 주세요.");
-          } else {
-            try {
-              const updated = await api.topicsBest(view.sort, view.hours, view.pages, source);
-              if (dead) return;
-              const latest = current.current;
-              if (view.sort === latest.sort && view.hours === latest.hours && view.pages === latest.pages) {
-                setData(updated); syncedDone = status.done; setSyncNote(null);
-                counts = countResults(updated.items, session.nos);
-                awaitingList = false;
-              }
-            } catch (e) { if (!dead) setSyncNote((e as Error).message); }
-          }
-        }
-        if (dead) return;
         setPollError(null);
-        setSession({ ...session, status, counts, awaitingList });
+        setSession({ ...session, status, counts: countResults(status.results) });
         if (!activeRun(status)) return;
       } catch (e) { if (!dead) setPollError((e as Error).message); }
       if (!dead) timer = window.setTimeout(poll, 2000);
@@ -134,24 +116,24 @@ function useTopicCheck(source: TopicSource, data: BestResponse | null, setData: 
   }, [session?.estimate.run_id, running, source, setData, setSession]);
 
   async function estimate(force = false, next = false) {
-    if (pending || running) return;
+    if (pending || running || listChanging) return;
     const id = ++request.current;
     const excluded = next && session ? [...session.excluded, ...session.estimate.selected_nos.slice(0, session.status?.done ?? 0).map(String)] : [];
     const nos = visible.filter((t) => !excluded.includes(String(t.no))).slice(0, 200).map((t) => t.no);
-    setPending(true); setMessage(null); setPollError(null); setSyncNote(null); setSession(null);
+    setPending(true); setMessage(null); setPollError(null); setSession(null);
     try {
       const result = await api.topicFcEstimate(source, nos, force);
       if (alive.current && id === request.current) setSession({ estimate: result, nos, force, excluded, status: null,
-        counts: countResults(visible, nos), awaitingList: false, view: { sort, hours, pages } });
+        counts: countResults([]), view: { sort, hours, pages } });
     } catch (e) { if (alive.current && id === request.current) setMessage((e as Error).message); }
     finally { if (alive.current && id === request.current) setPending(false); }
   }
   async function start() {
-    if (!session || pending || session.status) return;
+    if (!session || fcSessions[source] !== session || pending || session.status || listChanging) return;
     setPending(true); setMessage(null);
     try {
       const result = await api.topicFcRun(session.estimate.run_id);
-      setSession({ ...session, status: { run_id: result.run_id, source, state: "running", done: 0, total: result.total, cost_usd: 0, stop_reason: null, error: null } });
+      setSession({ ...session, status: { run_id: result.run_id, source, state: "running", done: 0, total: result.total, cost_usd: 0, stop_reason: null, error: null, results: [] } });
     } catch (e) {
       if (alive.current) {
         setMessage((e as Error).message);
@@ -164,18 +146,19 @@ function useTopicCheck(source: TopicSource, data: BestResponse | null, setData: 
     if (!session || pending || !running) return;
     setPending(true); setMessage(null);
     try {
-      // cancel는 전역 실행을 취소하므로 먼저 자기 실행인지 다시 확인한다.
-      const before = await api.topicFcStatus();
-      if (before.run_id !== session.estimate.run_id || before.source !== source) {
-        setMessage("다른 판정 실행으로 상태가 바뀌었습니다. 목록을 새로 불러와 주세요."); return;
-      }
-      if (!activeRun(before)) return; // 진행 조회가 마지막 칩 갱신까지 마친다.
-      const status = await api.topicFcCancel();
-      if (activeRun(status) && status.run_id === session.estimate.run_id && status.source === source) setSession({ ...session, status });
+      const status = await api.topicFcCancel(session.estimate.run_id);
+      if (activeRun(status) && status.run_id === session.estimate.run_id && status.source === source) setSession({ ...session, status, counts: countResults(status.results) });
     } catch (e) { if (alive.current) setMessage((e as Error).message); }
     finally { if (alive.current) setPending(false); }
   }
-  return { session, pending, running, message, pollError, syncNote, estimate, start, cancel, dismiss: () => { setSession(null); setMessage(null); } };
+  const invalidateEstimate = useCallback(() => {
+    if (!fcSessions[source]?.status) {
+      request.current++;
+      setPending(false);
+      setSession(null);
+    }
+  }, [source, setSession]);
+  return { session, pending, running, message, pollError, estimate, start, cancel, invalidateEstimate, dismiss: () => { setSession(null); setMessage(null); } };
 }
 
 function Card({ t, busy, onMake, muted, topic }: { t: BestTopic; busy: boolean; onMake: () => void; muted?: boolean; topic?: string }) {
@@ -244,12 +227,6 @@ function BestPanelContent({ source }: { source: TopicSource }) {
   const ch = useLoad<Channel>(() => api.channel(), []);
   const channel = ch.data;
 
-  const refresh = useCallback(async () => {
-    setRefreshing(true); setErr(null);
-    try { setData(await api.refreshBest(sort, hours, pages, source)); } catch (e) { setErr((e as Error).message); }
-    setRefreshing(false);
-  }, [sort, hours, pages, source, setData]);
-
   const { shown, hidden, fitN, madeN } = useMemo(() => {
     const all = data?.items ?? [];
     const doubtOk = hideDoubt ? all.filter((t) => liveChip(t.fc)?.color !== "bad") : all;
@@ -261,15 +238,23 @@ function BestPanelContent({ source }: { source: TopicSource }) {
   }, [data, hideUnfit, hideMade, hideDoubt]);
 
   const visible = open ? [...shown, ...hidden] : shown;
-  const fc = useTopicCheck(source, data, setData, sort, hours, pages, visible);
+  const fc = useTopicCheck(source, data, setData, sort, hours, pages, visible, refreshing || applying);
   const fcLocked = fc.pending || fc.running;
   const listReady = data?.sort === sort && data.hours === hours && (blind || data.pages === pages);
   const estimate = fc.session?.estimate;
   const status = fc.session?.status;
   const summary = fc.session?.counts ?? { bad: 0, warn: 0, outline: 0, ok: 0, failed: 0 };
 
+  const refresh = useCallback(async () => {
+    fc.invalidateEstimate();
+    setRefreshing(true); setErr(null);
+    try { setData(await api.refreshBest(sort, hours, pages, source)); } catch (e) { setErr((e as Error).message); }
+    setRefreshing(false);
+  }, [sort, hours, pages, source, setData, fc.invalidateEstimate]);
+
   /** 채널 대주제를 바꾸고(저장) 목록을 다시 받는다 — 서버가 새 대주제로 점수를 매겨 순서를 바꿔 보낸다. */
   async function applyChannel(body: { main_topic: string | null; custom?: string | null }) {
+    fc.invalidateEstimate();
     setApplying(true); setErr(null);
     try { ch.setData(await api.setChannel(body)); setCustomOpen(false); setData(await api.topicsBest(sort, hours, pages, source)); }
     catch (e) { setErr((e as Error).message); }
@@ -293,15 +278,15 @@ function BestPanelContent({ source }: { source: TopicSource }) {
   return (
     <>
       <div className="flex flex-wrap items-center gap-3 border-b border-line px-6 py-3">
-        <Segmented value={sort} onChange={(v) => { if (!fcLocked) setSort(v); }} options={[{ value: "views", label: "조회순" }, { value: "comments", label: "댓글순" }, { value: "recent", label: "최신순" }]} />
+        <Segmented value={sort} onChange={(v) => { if (!fcLocked) { fc.invalidateEstimate(); setSort(v); } }} options={[{ value: "views", label: "조회순" }, { value: "comments", label: "댓글순" }, { value: "recent", label: "최신순" }]} />
         <label className="flex items-center gap-2 text-[13px] text-sub">기간
-          <select disabled={fcLocked} value={hours} onChange={(e) => setHours(Number(e.target.value))} className="h-8 rounded-lg border border-line bg-fill px-2 text-[13px] text-ink">
+          <select disabled={fcLocked} value={hours} onChange={(e) => { fc.invalidateEstimate(); setHours(Number(e.target.value)); }} className="h-8 rounded-lg border border-line bg-fill px-2 text-[13px] text-ink">
             {HOURS.map((h) => <option key={h} value={h}>{h}시간</option>)}
           </select>
         </label>
         {!blind && (
           <label className="flex items-center gap-2 text-[13px] text-sub">쪽 수
-            <select disabled={fcLocked} value={pages} onChange={(e) => setPages(Number(e.target.value))} className="h-8 rounded-lg border border-line bg-fill px-2 text-[13px] text-ink">
+            <select disabled={fcLocked} value={pages} onChange={(e) => { fc.invalidateEstimate(); setPages(Number(e.target.value)); }} className="h-8 rounded-lg border border-line bg-fill px-2 text-[13px] text-ink">
               {[1, 2, 3, 4, 5].map((p) => <option key={p} value={p}>{p}쪽</option>)}
             </select>
           </label>
@@ -350,7 +335,7 @@ function BestPanelContent({ source }: { source: TopicSource }) {
         </div>
       )}
       <div className="scroll-thin min-h-[320px] flex-1 overflow-y-auto px-6 py-4">
-        {(data?.fc_ready === false || fc.pending || fc.session || fc.message || fc.pollError || fc.syncNote) && (
+        {(data?.fc_ready === false || fc.pending || fc.session || fc.message || fc.pollError) && (
           <div className="mb-3 flex flex-wrap items-center gap-3 rounded-[14px] border border-line bg-fill px-4 py-3 text-[13px] tabular-nums" aria-label="가짜뉴스 체크 상태" aria-busy={fc.pending}>
             <div className="contents" role="status" aria-live="polite">
               {data?.fc_ready === false && <span className="w-full text-sub">{data.fc_note}</span>}
@@ -375,7 +360,7 @@ function BestPanelContent({ source }: { source: TopicSource }) {
               </>}
               {status && !fc.running && <>
                 <span className="text-ink">
-                  <b className="font-semibold">{status.state === "done" ? "제목 판정 끝" : status.state === "failed" ? "제목 판정 오류" : "제목 판정 멈춤"}</b> · 시사 {estimate?.news ?? 0}건 — {" "}
+                  <b className="font-semibold">{status.state === "done" ? "제목 판정 끝" : status.state === "failed" ? "제목 판정 오류" : "제목 판정 멈춤"}</b> · 시사 {estimate?.news ?? 0}건 중 {status.done}건 판정 — {" "}
                   <span className="text-bad-text">가짜 의심 {summary.bad}</span> · <span className="text-warn-text">주의 {summary.warn}</span> · {" "}
                   <span className="text-sub">확인 안 됨 {summary.outline}</span> · <span className="text-ok-text">보도 확인 {summary.ok}</span>
                   {summary.failed > 0 && <span className="text-sub"> · 확인 실패 {summary.failed}</span>} · {dollars(status.cost_usd)}
@@ -386,10 +371,9 @@ function BestPanelContent({ source }: { source: TopicSource }) {
               {status?.error && <span className="w-full break-words text-bad-text">{status.error}</span>}
               {fc.message && <span className="w-full break-words text-bad-text">{fc.message}</span>}
               {fc.pollError && <span className="w-full break-words text-bad-text">{fc.pollError}</span>}
-              {fc.syncNote && <span className="w-full break-words text-warn-text">{fc.syncNote}</span>}
             </div>
             {estimate && !status && !fc.pending && <span className="ml-auto flex flex-wrap items-center gap-2">
-              {estimate.todo > 0 && <Button size="sm" variant="primary" disabled={!listReady || !data?.fc_ready} onClick={fc.start}>검사 시작</Button>}
+              {estimate.todo > 0 && <Button size="sm" variant="primary" disabled={!listReady || !data?.fc_ready || refreshing || applying} onClick={fc.start}>검사 시작</Button>}
               <Button size="sm" variant="ghost" onClick={fc.dismiss}>취소</Button>
             </span>}
             {fc.running && <Button size="sm" variant="ghost" className="ml-auto" disabled={fc.pending || status?.state === "cancelling"} onClick={fc.cancel}>멈추기</Button>}

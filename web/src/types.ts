@@ -89,7 +89,7 @@ export interface TopicFactcheck {
   kind: "news" | "general" | "uncertain";
   status: "false" | "partly" | "true" | "unverified" | "failed" | null;
   chip: { label: string; color: "bad" | "warn" | "outline" | "ok" } | null;
-  why: string | null; sources: { url: string; outlet: string; date: string }[] | null;
+  why: string | null; sources: { url: string; outlet: string; date: string | null }[] | null;
   at: string | null; expired: boolean;
 }
 export interface TopicFcEstimate {
@@ -100,6 +100,7 @@ export interface TopicFcStatus {
   run_id: string | null; source: "dcbest" | "blind" | null;
   state: "idle" | "running" | "cancelling" | "done" | "stopped" | "failed";
   done: number; total: number; cost_usd: number; stop_reason: string | null; error: string | null;
+  results: { no: string | number; fc: TopicFactcheck }[];
 }
 export type BestSort = "views" | "comments" | "recent";
 /** source: dcbest(디시 실시간 베스트) | blind(블라인드 토픽 베스트 — triage 는 "skipped"). */

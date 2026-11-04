@@ -533,7 +533,20 @@ class TopicFactcheck:
     def status(self) -> dict:
         with self.lock:
             self._refresh_pending()
-            return dict(self._state)
+            return {**self._state, "results": self._results()}
+
+    def _results(self) -> list[dict]:
+        """현재/마지막 실행의 보관 판정만 읽는다. 분류·판정·장부 조회는 하지 않는다."""
+        results = []
+        for item in getattr(self, "_run_items", ()):
+            rec = read_record(self.cache, self._state["source"], item["no"], item["title"])
+            if not rec or rec.get("status") is None:
+                continue
+            fc = {k: rec.get(k) for k in ("kind", "status", "why", "sources", "at")}
+            stale = expired(rec, self.clock())
+            fc.update(chip=None if stale else chip(rec), expired=stale)
+            results.append({"no": item["no"], "fc": fc})
+        return results
 
     def start(self, run_id: str) -> dict:
         with self.lock:
@@ -560,6 +573,7 @@ class TopicFactcheck:
                 self.cancelled.clear()
                 self._state = {"run_id": run_id, "source": snapshot["source"], "state": "running", "done": 0,
                                "total": len(snapshot["items"]), "cost_usd": 0.0, "stop_reason": None, "error": None}
+                self._run_items = snapshot["items"]
                 self.thread = None
                 if snapshot["items"]:
                     self.thread = threading.Thread(target=self._work, args=(snapshot, lease), name="topic-factcheck", daemon=True)
@@ -577,12 +591,14 @@ class TopicFactcheck:
                 lease.close()
                 raise
 
-    def cancel(self) -> dict:
+    def cancel(self, run_id: str | None = None) -> dict:
         with self.lock:
+            if not run_id or run_id != self._state["run_id"]:
+                raise Conflict("다른 판정 실행이라 멈추지 않았습니다")
             if self._state["state"] in ("running", "cancelling"):
                 self.cancelled.set()
                 self._state["state"] = "cancelling"
-            return dict(self._state)
+            return {**self._state, "results": self._results()}
 
     def _stop(self, reason: str):
         self._state.update(state="stopped", stop_reason=reason)

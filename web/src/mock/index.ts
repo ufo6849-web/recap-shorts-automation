@@ -10,7 +10,8 @@ let channel: { main_topic: string | null; custom: string | null } = { main_topic
 const channelView = (): Channel => ({ ...channel, label: channel.main_topic === "custom" ? channel.custom : (PRESETS.find((p) => p.id === channel.main_topic)?.label ?? null), source: "local", presets: PRESETS });
 
 // 주제 찾기: ?mock=1&topicfc=ready|empty|checked|capped|unready|stopped|failed|expired-cache|error400|error409|error502
-// 기본 ready는 칩 4종 + 일반 + 만료 + 미판정. 유료 호출 없이 실행당 한 글씩 완료된다.
+// topicfc_classification_usd=0.04 로 새 항목 분류 비용 선택, topicfc_kind=news|general|uncertain 로 분류 결과 선택.
+// 기본 ready는 칩 4종 + 일반 + 만료 + 미분류. 유료 호출 없이 실행당 한 글씩 완료된다.
 const topicFcCase = new URLSearchParams(location.search).get("topicfc") ?? "ready";
 const topicFcRecords = new Map<string, TopicFactcheck>();
 const topicFcKey = (source: string, no: string | number) => `${source}:${no}`;
@@ -33,8 +34,8 @@ const topicFcFixtures = (source: "dcbest" | "blind"): BestTopic[] => {
       const record = topicFcCase === "empty" ? topicFcGeneral() : topicFcCase === "checked" ? topicFcVerdict(i)
         : i === 4 ? topicFcGeneral() : i < 4 ? topicFcVerdict(i)
         : i === 5 ? { ...topicFcVerdict(3), chip: null, expired: true, at: new Date(Date.now() - 25 * 3600_000).toISOString() }
-        : { ...topicFcGeneral(), kind: "news" as const };
-      topicFcRecords.set(key, record);
+        : null;
+      if (record) topicFcRecords.set(key, record);
     }
     return { ...BEST[0], no, title: `[가상] ${titles[i % titles.length]}${i >= titles.length ? ` ${i + 1}` : ""}`,
       tag: source === "blind" ? "토픽 베스트" : "시사 예시", views: 90000 - i * 100, comments: 900 - i,
@@ -46,8 +47,8 @@ const topicFcLists = { dcbest: topicFcFixtures("dcbest"), blind: topicFcFixtures
 function topicFcAnnotate(source: "dcbest" | "blind", items: BestTopic[]) {
   const counts = { news: 0, checked: 0, doubt: 0 };
   for (const item of items) {
-    item.fc = structuredClone(topicFcRecords.get(topicFcKey(source, item.no)) ?? topicFcGeneral());
-    if (item.fc.kind !== "general") {
+    item.fc = structuredClone(topicFcRecords.get(topicFcKey(source, item.no)) ?? null);
+    if (item.fc && item.fc.kind !== "general") {
       counts.news++;
       if (item.fc.status && item.fc.status !== "failed" && !item.fc.expired) counts.checked++;
       if (!item.fc.expired && item.fc.chip?.color === "bad") counts.doubt++;
@@ -55,7 +56,7 @@ function topicFcAnnotate(source: "dcbest" | "blind", items: BestTopic[]) {
   }
   return { fc_counts: counts, fc_ready: topicFcCase !== "unready", fc_note: topicFcCase === "unready" ? "OpenRouter 키가 있어야 합니다" : "" };
 }
-let topicFcState: TopicFcStatus = { run_id: null, source: null, state: "idle", done: 0, total: 0, cost_usd: 0, stop_reason: null, error: null };
+let topicFcState: TopicFcStatus = { run_id: null, source: null, state: "idle", done: 0, total: 0, cost_usd: 0, stop_reason: null, error: null, results: [] };
 const topicFcSnapshots = new Map<string, { source: "dcbest" | "blind"; nos: (string | number)[]; force: boolean; at: number }>();
 let topicFcWork: (string | number)[] = [];
 let topicFcTickAt = 0;
@@ -74,13 +75,20 @@ function topicFcTick() {
   else if (topicFcCase === "stopped") { topicFcState.state = "stopped"; topicFcState.stop_reason = "daily_limit"; }
   else if (topicFcState.done >= topicFcState.total) topicFcState.state = "done";
 }
+function topicFcStatus(): TopicFcStatus {
+  return { ...topicFcState, results: topicFcWork.flatMap((no) => {
+    const fc = topicFcRecords.get(topicFcKey(topicFcState.source!, no));
+    return fc?.status ? [{ no, fc: structuredClone(fc) }] : [];
+  }) };
+}
 function topicFcRequest(method: string, path: string, body: unknown) {
-  topicFcTick();
   const fail = (message: string, code = 409): never => { throw new ApiError(message, code, { message }); };
-  if (path.endsWith("/status") && method === "GET") return { ...topicFcState };
+  if (path.endsWith("/status") && method === "GET") { topicFcTick(); return topicFcStatus(); }
   if (path.endsWith("/cancel") && method === "POST") {
+    const run_id = (body as { run_id?: string } | undefined)?.run_id;
+    if (!run_id || run_id !== topicFcState.run_id) fail("다른 판정 실행이라 멈추지 않았습니다");
     if (topicFcState.state === "running") topicFcState.state = "cancelling";
-    return { ...topicFcState };
+    return topicFcStatus();
   }
   if (path.endsWith("/estimate") && method === "POST") {
     if (topicFcCase.startsWith("error")) {
@@ -90,13 +98,22 @@ function topicFcRequest(method: string, path: string, body: unknown) {
     if (topicFcCase === "unready") fail("OpenRouter 키가 있어야 합니다");
     const { source, nos, force = false } = body as { source: "dcbest" | "blind"; nos: (string | number)[]; force?: boolean };
     if (!Array.isArray(nos) || nos.length > 200 || !topicFcLists[source]) fail("소재 견적 요청이 올바르지 않습니다", 400);
-    const news = [...new Set(nos)].filter((no) => topicFcRecords.get(topicFcKey(source, no))?.kind !== "general" && topicFcRecords.has(topicFcKey(source, no)));
+    const unique = [...new Map(nos.map((no) => [String(no), no])).values()];
+    const missing = unique.filter((no) => !topicFcRecords.has(topicFcKey(source, no)));
+    const params = new URLSearchParams(location.search);
+    const kind = params.get("topicfc_kind") ?? (topicFcCase === "empty" ? "general" : "uncertain");
+    for (const no of missing) topicFcRecords.set(topicFcKey(source, no), {
+      ...topicFcGeneral(), kind: kind === "general" || kind === "news" ? kind : "uncertain",
+    });
+    const chosenCost = Number(params.get("topicfc_classification_usd") ?? Math.ceil(missing.length / 30) * 0.01);
+    const classification_usd = missing.length && Number.isFinite(chosenCost) && chosenCost >= 0 ? chosenCost : 0;
+    const news = unique.filter((no) => topicFcRecords.get(topicFcKey(source, no))!.kind !== "general");
     const todo = news.filter((no) => { const rec = topicFcRecords.get(topicFcKey(source, no))!; return force || rec.expired || !rec.status || rec.status === "failed"; });
     const run_id = `mock-topicfc-${Date.now()}-${topicFcSnapshots.size}`;
     const selected_nos = todo.slice(0, 30);
     topicFcSnapshots.set(run_id, { source, nos: selected_nos, force, at: Date.now() });
     return { run_id, news: news.length, done: news.length - todo.length, todo: selected_nos.length,
-      classification_usd: 0, est_usd: selected_nos.length * 0.08, per_item_usd: 0.08, capped: todo.length > 30, selected_nos } satisfies TopicFcEstimate;
+      classification_usd, est_usd: selected_nos.length * 0.08, per_item_usd: 0.08, capped: todo.length > 30, selected_nos } satisfies TopicFcEstimate;
   }
   if (path.endsWith("/run") && method === "POST") {
     if (topicFcState.state === "running" || topicFcState.state === "cancelling") fail("이미 사실 확인 중입니다");
@@ -104,7 +121,7 @@ function topicFcRequest(method: string, path: string, body: unknown) {
     const snap = topicFcSnapshots.get(run_id);
     if (!snap || Date.now() - snap.at >= 600_000) return fail("목록이 바뀌어 다시 눌러 주세요");
     topicFcWork = snap.nos.filter((no) => { const rec = topicFcRecords.get(topicFcKey(snap.source, no))!; return snap.force || rec.expired || !rec.status || rec.status === "failed"; });
-    topicFcState = { run_id, source: snap.source, state: topicFcWork.length ? "running" : "done", done: 0, total: topicFcWork.length, cost_usd: 0, stop_reason: null, error: null };
+    topicFcState = { run_id, source: snap.source, state: topicFcWork.length ? "running" : "done", done: 0, total: topicFcWork.length, cost_usd: 0, stop_reason: null, error: null, results: [] };
     topicFcTickAt = Date.now(); topicFcSnapshots.delete(run_id);
     return { started: true, total: topicFcWork.length, run_id };
   }
