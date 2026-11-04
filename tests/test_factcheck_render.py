@@ -6,9 +6,12 @@
 import json
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 from PIL import Image, ImageDraw
 
+from recap_shorts import pipeline as P
 from recap_shorts.collect import news_card as NC
 from recap_shorts.images import arrange, sensitive
 from recap_shorts.render import layout
@@ -93,6 +96,92 @@ def test_news_card_scores_only_the_body_sentence_with_its_fact():
              {"index": 3, "role": "body", "hint": "", "evidence": None}]
     sc = arrange.heuristic_scores(sents, [NEWS])
     assert [row[0] for row in sc] == [0.0, 0.95, 0.0, 0.0]
+
+
+@pytest.mark.parametrize("evidence", ["분석된 176개 제품 가운데 27개가 원유 0%였다",
+                                      "분석된176개제품가운데27개가원유0%였다!",
+                                      "분석된 176개 제품 가운데 27개가 원유 0%였다는 보도"])
+def test_news_matches_another_fact_from_same_source(evidence):
+    other = "분석된 176개 제품 가운데 27개가 원유 0%였다"
+    card = dict(NEWS, fact_ids=["F1", "F3"], fact_texts=[FACT, other])
+    sentence = {"index": 0, "role": "body", "evidence": evidence}
+    assert arrange.heuristic_scores([sentence], [card]) == [[0.95]]
+
+
+@pytest.mark.parametrize("role,expected", [("body", 0.85), ("hook", 0.0)])
+def test_news_title_overlap_without_matching_fact(role, expected):
+    title = "가공유 함량 표시 제도 개선 검토"
+    card = dict(NEWS, title=title)
+    sentence = {"index": 0, "role": role, "text": title, "evidence": title}
+    assert not arrange._news_match(title, FACT)
+    assert arrange.heuristic_scores([sentence], [card])[0][0] == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("reference,expected", [("aa bb", 0.0), ("aa bb cc", 0.5),
+                                               ("aa bb cc dd ee ff", 0.65)])
+def test_news_overlap_threshold_and_proportional_score(reference, expected):
+    sentence = {"index": 0, "role": "body", "text": "aa bb cc dd ee ff gg hh ii jj"}
+    card = dict(NEWS, fact_texts=[reference])
+    assert arrange.heuristic_scores([sentence], [card])[0][0] == pytest.approx(expected)
+
+
+def test_news_unrelated_sentence_scores_zero_with_all_metadata():
+    card = dict(NEWS, fact_texts=[FACT, "가공유 함량 표시 제도 개선"], title=TITLE)
+    sentence = {"index": 0, "role": "body", "text": "야구 경기에서 삼진을 잡았다", "evidence": "투수의 승리"}
+    assert arrange.heuristic_scores([sentence], [card]) == [[0.0]]
+
+
+@pytest.mark.parametrize("count,expected", [(3, [0, 2, 1]), (2, [0, 2])])
+def test_news_fallback_adds_to_best_body_and_replaces_lowest_score(count, expected):
+    images = [{"file": "cap", "kind": "cap"}, {"file": "ai", "kind": "ai"}, NEWS]
+    infos = [{"index": 0, "role": "hook", "text": FACT},
+             {"index": 1, "role": "body", "text": "야구 경기"},
+             {"index": 2, "role": "body", "text": FACT},
+             {"index": 3, "role": "closing", "text": FACT}]
+    pick = [[0], [0], [0, 1], [0]]
+    P._ensure_news_card(pick, infos, images, [[0.9, 0.2, 0.0]] * 4, [1, 1, count, 1])
+    assert pick == [[0], [0], expected, [0]]
+
+
+@pytest.mark.parametrize("shared,placed", [(0, False), (2, False), (3, False), (4, True)])
+def test_news_fallback_requires_strictly_more_than_point_fifteen(shared, placed):
+    words = "aa bb cc dd ee ff gg hh ii jj kk ll mm nn oo pp qq rr ss tt".split()
+    card = dict(NEWS, fact_texts=[" ".join(words[:shared])])
+    infos = [{"index": 0, "role": "body", "text": " ".join(words)}]
+    pick = [[0]]
+    assert arrange.news_overlap(infos[0], card) == shared / 20
+    P._ensure_news_card(pick, infos, [{"kind": "cap"}, card], [[0.7, 0.0]], [2])
+    assert pick == ([[0, 1]] if placed else [[0]])
+
+
+def test_news_fallback_leaves_existing_news_placement_alone():
+    images = [{"kind": "cap"}, NEWS, dict(NEWS, file="other.png")]
+    infos = [{"index": 0, "role": "body", "text": FACT}]
+    pick = [[0, 1]]
+    P._ensure_news_card(pick, infos, images, [[0.7, 0.95, 0.95]], [3])
+    assert pick == [[0, 1]]
+
+
+@pytest.mark.parametrize("role,status", [("hook", "ok"), ("closing", "ok"), ("body", "error")])
+def test_news_fallback_only_uses_successful_cards_in_body(role, status):
+    infos = [{"index": 0, "role": role, "text": FACT}]
+    pick = [[0]]
+    P._ensure_news_card(pick, infos, [{"kind": "cap"}, dict(NEWS, status=status)], [[0.7, 0.0]], [2])
+    assert pick == [[0]]
+
+
+def test_build_plan_applies_news_fallback_after_assignment(tmp_path, monkeypatch):
+    for folder in ("script_final", "voice"):
+        (tmp_path / folder).mkdir()
+    (tmp_path / "script_final/script.json").write_text(json.dumps({"sentences": [{"text": FACT, "evidence": FACT}]}))
+    (tmp_path / "voice/timings.json").write_text(json.dumps({
+        "duration": 3, "sentences": [{"index": 1, "role": "body", "text": FACT, "start": 0, "end": 3}]}))
+    monkeypatch.setattr(P, "load_assets", lambda job: [{"file": "cap.png", "kind": "cap"}, NEWS])
+    monkeypatch.setattr(arrange, "plan_with_ai_cap", lambda *args: [[0]])
+    doc = P.build_plan(SimpleNamespace(dir=tmp_path, options={}), SimpleNamespace())
+    assert set(doc["plan"]["1"]) == {"cap.png", NEWS["file"]}
+    assert doc["scores"]["1"][NEWS["file"]] == 0.95
+    assert "캡처 2컷" in doc["note"]
 
 
 def test_kind_of_news_and_other_kinds_unchanged():

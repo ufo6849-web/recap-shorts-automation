@@ -14,8 +14,8 @@
  - 글자가 거의 없는 사진·짤(첨부 text 가 짧고 kind 에 '사진'·'짤')은 다른 이야기로 빼지 않는다.
    글쓴이 사진 8장처럼 겹쳐 볼 글자가 없는 사진은 글자로 가리면 전부 0점이 되고
    AI 가 만든 그림이 그 자리를 채워(시청자에게 글쓴이 사진처럼 보임) 버린다. 글자 많은 캡처를 가려내던 규칙은 그대로 둔다.
- - 뉴스 카드(role "news"): 자료 확인으로 얻은 사실의 출처 기사 카드. 그 사실을 evidence 로 쓴 본문 문장(훅 제외)에만
-   NEWS_MATCH 점수를 주고 다른 문장은 0. 캡처처럼 칸을 세고 순서를 매기며, AI 로 세지 않는다.
+ - 뉴스 카드(role "news"): 사실과 evidence 가 맞으면 NEWS_MATCH, 아니면 사실·제목과 문장의 글자 겹침으로 점수를 준다.
+   훅은 0. 캡처처럼 칸을 세고 순서를 매기며, AI 로 세지 않는다.
 """
 from __future__ import annotations
 
@@ -24,7 +24,9 @@ import re
 from recap_shorts.script.text import normalize_loose
 
 CAP_WORDS = ("캡처", "표", "카드", "스크린샷", "게시글", "글 ")
-NEWS_MATCH = 0.95            # 뉴스 카드(role news)가 그 사실을 근거로 쓴 본문 문장에 주는 점수. 다른 문장은 0
+NEWS_MATCH = 0.95            # 뉴스 카드의 사실을 근거로 쓴 문장의 점수
+NEWS_OVERLAP_MIN = 0.3       # 바꿔 쓴 근거도 받되 우연히 몇 글자만 겹친 문장은 제외한다.
+NEWS_FALLBACK_MIN = 0.15     # 카드가 모두 빠졌을 때도 최소한의 관련성이 있는 본문에만 보정한다.
 ATTACH_REF = re.compile(r"첨부\s*그림\s*(\d+)")
 SAME_ATTACH_BONUS = 0.15      # 문장이 말하는 첨부의 통째 캡처
 RELATED_MIN = 0.35            # 대본이 말한 첨부와 글자(두 글자씩) 겹침이 이만큼이면 같은 이야기(다른 이야기는 많아야 0.20)
@@ -123,10 +125,21 @@ def _news_match(evidence: str | None, fact_text: str | None) -> bool:
     return bool(a and b) and (a == b or a in b or b in a)
 
 
+def _news_fact_texts(image: dict) -> list[str]:
+    return image.get("fact_texts") or [image.get("fact_text") or ""]
+
+
+def news_overlap(sentence: dict, image: dict) -> float:
+    """문장 text+evidence 의 두 글자 조각 중 카드의 사실·제목에도 있는 비율."""
+    text = f"{sentence.get('text') or ''} {sentence.get('evidence') or ''}"
+    reference = " ".join(_news_fact_texts(image) + [image.get("title") or ""])
+    return _overlap(_grams(text), _grams(reference))
+
+
 def heuristic_scores(sentences: list[dict], images: list[dict], attachments: list[dict] | None = None) -> list[list[float]]:
     """sentences: [{"index","hint","role"}], images: [{"file","kind","sentence","role","attachment"}]
-    image role: "focus"(문장용으로 잘라 낸 캡처, sentence 있음) | "dc_head"(디시 글 머리) | "news"(뉴스 카드: fact_text 와
-    문장 evidence 가 같은 사실일 때만 점수) | None(통째 캡처·AI).
+    image role: "focus"(문장용으로 잘라 낸 캡처, sentence 있음) | "dc_head"(디시 글 머리) | "news"(뉴스 카드:
+    fact_texts 와 evidence 매칭, 또는 사실·제목과 문장 겹침) | None(통째 캡처·AI).
     attachments: topic.json 의 첨부 목록(없으면 다른 이야기 첨부를 가려내지 않음)."""
     n = len(sentences)
     whole = [j for j, im in enumerate(images) if im["kind"] == "cap" and not im.get("role")]
@@ -150,7 +163,14 @@ def heuristic_scores(sentences: list[dict], images: list[dict], attachments: lis
             elif role == "dc_head":
                 v += 0.75 if hook else -0.1
             elif role == "news":
-                v = NEWS_MATCH if not hook and _news_match(s.get("evidence"), im.get("fact_text")) else 0.0
+                v = 0.0
+                if not hook:
+                    if any(_news_match(s.get("evidence"), fact) for fact in _news_fact_texts(im)):
+                        v = NEWS_MATCH
+                    else:
+                        overlap = news_overlap(s, im)
+                        if overlap >= NEWS_OVERLAP_MIN:
+                            v = 0.5 + 0.35 * (overlap - NEWS_OVERLAP_MIN) / (1 - NEWS_OVERLAP_MIN)
             elif j in drop:
                 v = 0.0                                                # 이 영상이 말하지 않는 첨부
             else:

@@ -869,7 +869,7 @@ def step_voice(c: Ctx) -> None:
 # ------------------------------------------------------------------ 단계: assets
 def sentence_infos(script: dict, timings: dict) -> list[dict]:
     """타이밍 index(0=훅, 1..=본문, 마지막=끝 줄)마다 {index, role, text, hint, evidence}.
-    evidence 는 본문 문장의 근거 구절이다(없으면 ""). 뉴스 카드 그림은 이 근거와 같은 문장에만 붙는다."""
+    evidence 는 본문 문장의 근거 구절이다(없으면 ""). 뉴스 카드의 사실·제목과 문장을 맞출 때 쓴다."""
     body = script.get("sentences") or []
     out = []
     for s in timings["sentences"]:
@@ -1130,7 +1130,8 @@ def _news_cards(c: Ctx, topic: dict) -> list[dict]:
     c.sub("뉴스 카드", "running")
     made = []
     for url in urls:
-        fact = next(f for f in facts if f.get("source") == url)
+        source_facts = [f for f in facts if f.get("source") == url]
+        fact = source_facts[0]
         m = meta.get(url) or {}
         outlet = str(m.get("outlet") or "")
         title = str(m.get("title") or "") or outlet                 # 제목이 없으면 언론사 이름을 쓴다
@@ -1143,6 +1144,8 @@ def _news_cards(c: Ctx, topic: dict) -> list[dict]:
             continue
         made.append({"file": rel(c.job, out), "kind": "cap", "role": "news", "status": "ok",
                      "fact_id": fact.get("id"), "fact_text": fact.get("text"), "source_url": url,
+                     "fact_ids": [f.get("id") for f in source_facts],
+                     "fact_texts": [f.get("text") or "" for f in source_facts],
                      "outlet": outlet, "title": title, "date": date})
     c.sub("뉴스 카드", "done" if len(made) == len(urls) else "error", f"{len(made)}장")
     return made
@@ -1428,6 +1431,7 @@ def build_plan(job: Job, deps: Deps, ctx: Ctx | None = None) -> dict:
     owners = [pos.get(e.get("sentence")) if k == "focus" else (hook_pos if k == "dc_head" else None)
               for e, k in zip(images, kinds)]
     pick = arrange.plan_with_ai_cap(scores, counts, kinds, owners, float(job.options.get("max_ai_share", 0.34)))
+    _ensure_news_card(pick, infos, images, scores, counts)
     plan = {str(s["index"]): [images[j]["file"] for j in pick[n]] for n, s in enumerate(sents)}
     sc = {str(s["index"]): {images[j]["file"]: round(scores[n][j], 3) for j in range(len(images))} for n, s in enumerate(sents)}
     used = [j for lst in pick for j in lst]
@@ -1437,6 +1441,29 @@ def build_plan(job: Job, deps: Deps, ctx: Ctx | None = None) -> dict:
             "scores": sc, "scored_by": "clef" if clef else "heuristic",
             "note": (f"자동 배치(Clef 적합도 + 규칙, 캡처 먼저) — {mix}" if clef
                      else f"자동 배치(규칙: 캡처 먼저, AI 는 문장당 1장까지 끝에) — {mix}")}
+
+
+def _ensure_news_card(pick: list[list[int]], infos: list[dict], images: list[dict],
+                      scores: list[list[float]], counts: list[int]) -> None:
+    """뉴스 카드가 전부 빠졌으면 가장 관련 있는 본문에 한 장만 보정 배치한다."""
+    from recap_shorts.images import arrange
+    news = [j for j, im in enumerate(images) if im.get("role") == "news" and im.get("status") == "ok"]
+    if any(j in news for row in pick for j in row):
+        return
+    candidates = [(arrange.news_overlap(s, images[j]), i, j)
+                  for i, s in enumerate(infos) if s.get("role") == "body" and counts[i] > 0
+                  for j in news]
+    if not candidates:
+        return
+    overlap, i, j = max(candidates, key=lambda candidate: candidate[0])
+    if overlap <= arrange.NEWS_FALLBACK_MIN:
+        return
+    if len(pick[i]) >= counts[i]:
+        pick[i].remove(min(pick[i], key=lambda old: scores[i][old]))
+    pick[i].append(j)
+    # assign 과 같은 순서: 통째 캡처·뉴스 → 확대 캡처 → AI.
+    pick[i].sort(key=lambda k: (arrange.kind_of(images[k]) == "ai",
+                                arrange.kind_of(images[k]) == "focus", -scores[i][k]))
 
 
 def write_timeline(job: Job) -> dict:

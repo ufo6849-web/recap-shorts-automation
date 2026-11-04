@@ -258,7 +258,7 @@ def test_verify_keeps_only_cited_urls_and_takes_title_from_metadata(monkeypatch)
     out = F.verify([VCLAIM])
     r = out["results"][0]
     assert r["verdict"] == "partly" and r["fact"] == "표시 개선을 검토 중이다" and r["why"] == "검토 단계"
-    assert r["sources"] == [{"url": URL_A, "title": "식약처, 가공유 표시 개선 검토", "outlet": "조선일보",
+    assert r["sources"] == [{"url": URL_A, "title": "식약처, 가공유 표시 개선 검토", "outlet": "조선비즈",
                              "date": "2026-11-02"}]
 
 

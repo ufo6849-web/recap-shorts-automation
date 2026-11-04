@@ -440,6 +440,8 @@ def test_script_check_not_called_without_false_or_unverified(tmp_path):
 # ---------------------------------------------------------------- 뉴스 카드·문장 근거
 def test_news_cards_one_per_source_up_to_two(tmp_path):
     deps = three_sources_deps()
+    other_fact = "분석된 176개 제품 가운데 27개가 원유 0%였다"
+    deps.fc_verdicts["C3"] = {"fact": other_fact}
     store, runner, job = make(tmp_path, deps, {"auto_steps": ["read", "script"]})
     go(runner, job)
     ents = [e for e in json.loads((job.dir / "assets/assets.json").read_text(encoding="utf-8")) if e.get("role") == "news"]
@@ -447,8 +449,10 @@ def test_news_cards_one_per_source_up_to_two(tmp_path):
     assert all((job.dir / e["file"]).is_file() for e in ents)
     assert ents[0] == {"file": "assets/news/card_01.png", "kind": "cap", "role": "news", "status": "ok",
                        "fact_id": "F1", "fact_text": FC_FACT, "source_url": FC_URL, "outlet": "조선일보",
+                       "fact_ids": ["F1", "F3"], "fact_texts": [FC_FACT, other_fact],
                        "title": FC_SOURCE["title"], "date": "2026-11-02"}
     assert ents[1]["source_url"] == OTHER_SOURCE["url"] and ents[1]["fact_id"] == "F2"
+    assert ents[1]["fact_ids"] == ["F2"] and ents[1]["fact_texts"] == ["상대 팀은 열두 개 동 대표 선수였다"]
     assert ents[1]["title"] == "한국일보" and ents[1]["date"] is None          # 제목이 없으면 언론사 이름
     assert [c["title"] for c in deps.news_cards] == [FC_SOURCE["title"], "한국일보"]
     assert {x["label"]: x for x in job.step("assets")["sub"]}["뉴스 카드"]["status"] == "done"

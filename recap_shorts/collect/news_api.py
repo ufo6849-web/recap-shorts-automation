@@ -40,9 +40,9 @@ def load_outlets(path: Path | str = OUTLETS_PATH) -> dict:
 def outlet_for(url: str, outlets: dict | None = None) -> str:
     outlets = load_outlets() if outlets is None else outlets
     host = urlparse(url).netloc.lower().split(":")[0]
-    for dom, name in outlets.items():
+    for dom in sorted(outlets, key=len, reverse=True):
         if host == dom or host.endswith("." + dom):
-            return name
+            return outlets[dom]
     return host
 
 
