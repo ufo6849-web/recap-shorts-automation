@@ -216,6 +216,36 @@ def test_verify_asks_with_google_search_tool_model_and_120s(monkeypatch):
     assert c["timeout"] == 120
     assert c["body"]["tools"] == [{"google_search": {}}]
     assert c["body"]["generationConfig"] == {"responseMimeType": "application/json"}
+    prompt = c["body"]["contents"][0]["parts"][0]["text"]
+    assert '"public_event": true | false' in prompt
+    assert "주장의 성격으로 정한다" in prompt
+
+
+def test_verify_starts_user_message_with_all_queries_in_one_call(monkeypatch):
+    use_or_key(monkeypatch)
+    calls = fake_post(monkeypatch, verdict_answer([], chunks=[]))
+    claims = [VCLAIM, {"id": "C2", **CLAIM2}]
+    F.verify(claims)
+    (call,) = calls
+    (message,) = call["body"]["contents"]
+    assert message["role"] == "user"
+    prompt = message["parts"][0]["text"]
+    assert prompt.splitlines()[0] == f"검색어: {VCLAIM['query']} / {CLAIM2['query']}"
+    assert prompt.index("검색어: ") < prompt.index("verdict 는") < prompt.index("주장:\n")
+    for c in claims:
+        assert f"- {c['id']}: {c['claim']}" in prompt
+
+
+@pytest.mark.parametrize("query_fields", [{"query": ""}, {"query": "   "}, {"query": None}, {}])
+def test_verify_search_line_falls_back_to_claim_when_query_empty(monkeypatch, query_fields):
+    use_or_key(monkeypatch)
+    calls = fake_post(monkeypatch, verdict_answer([], chunks=[]))
+    fallback = {k: v for k, v in VCLAIM.items() if k != "query"}
+    fallback.update(query_fields)
+    F.verify([fallback, {"id": "C2", **CLAIM2}])
+    (call,) = calls
+    prompt = call["body"]["contents"][0]["parts"][0]["text"]
+    assert prompt.splitlines()[0] == f"검색어: {VCLAIM['claim']} / {CLAIM2['query']}"
 
 
 def test_verify_keeps_only_cited_urls_and_takes_title_from_metadata(monkeypatch):
@@ -258,7 +288,86 @@ def test_verify_false_stays_false_without_sources(monkeypatch):
     results = [{"id": "C1", "verdict": "false", "why": "보도와 다름", "fact": "그건 아님", "sources": []}]
     fake_post(monkeypatch, verdict_answer(results, chunks=[]))
     r = F.verify([VCLAIM])["results"][0]
+    assert r["verdict"] == "false" and r["fact"] == "그건 아님"
+
+
+def test_verify_false_fact_survives_record_but_is_not_a_topic_fact(monkeypatch, tmp_path):
+    use_or_key(monkeypatch)
+    fact = "식약처는 원유 함량 표시 제도 개선 검토에 착수했다."
+    results = [res("C1", "false", why=fact, fact=f"  {fact}  ", sources=[URL_A])]
+    fake_post(monkeypatch, verdict_answer(results, chunks=[web(URL_A, "표시 제도 개선 검토")]))
+    ver = F.verify([VCLAIM])
+    assert ver["results"][0]["verdict"] == "false"
+    assert ver["results"][0]["fact"] == fact
+    assert ver["results"][0]["why"] == fact
+    assert ver["results"][0]["sources"][0]["url"] == URL_A
+    rec = F.build_record(TITLE, SRC, {"kind": "info", "claims": [VCLAIM]}, ver)
+    F.save_record(tmp_path, rec)
+    saved = F.load_record(tmp_path)
+    assert saved["claims"][0]["fact"] == fact
+    assert saved["status"] == "stop"
+    assert F.gate(saved, TITLE, SRC, F.POLICY_VERSION)[0] == "blocked"
+    assert F.topic_additions(saved) == {
+        "facts": [],
+        "false_claims": [{"id": "C1", "claim": VCLAIM["claim"], "source_quote": VCLAIM["source_quote"]}],
+        "unverified_claims": [],
+    }
+
+
+@pytest.mark.parametrize("fact", [None, "", "   "])
+def test_verify_false_empty_fact_stays_none(monkeypatch, fact):
+    use_or_key(monkeypatch)
+    fake_post(monkeypatch, verdict_answer([res("C1", "false", fact=fact)], chunks=[]))
+    r = F.verify([VCLAIM])["results"][0]
     assert r["verdict"] == "false" and r["fact"] is None
+
+
+def test_verify_unverified_discards_model_fact(monkeypatch):
+    use_or_key(monkeypatch)
+    results = [res("C1", "unverified", fact="확인되지 않은 문장", sources=[URL_A])]
+    fake_post(monkeypatch, verdict_answer(results, chunks=[web(URL_A, "기사")]))
+    r = F.verify([VCLAIM])["results"][0]
+    assert r["verdict"] == "unverified" and r["fact"] is None
+
+
+@pytest.mark.parametrize("event_fields,expected", [
+    ({"public_event": True}, True), ({"public_event": False}, False), ({}, False),
+    ({"public_event": "false"}, False), ({"public_event": None}, False),
+])
+def test_verify_public_event_boolean_and_why_prefix(monkeypatch, event_fields, expected):
+    use_or_key(monkeypatch)
+    why = "해당 발표를 확인할 수 있는 보도가 없습니다."
+    results = [{**res("C1", "unverified", why=why), **event_fields}]
+    fake_post(monkeypatch, verdict_answer(results, chunks=[]))
+    r = F.verify([VCLAIM])["results"][0]
+    assert r["verdict"] == "unverified" and r["public_event"] is expected
+    prefix = "반드시 보도될 일인데 관련 보도를 찾지 못했습니다. " if expected else ""
+    assert r["why"] == prefix + why
+    assert F.overall_status([r]) == ("stop" if expected else "warn")
+
+
+@pytest.mark.parametrize("verdict", ["true", "partly"])
+def test_verify_public_event_without_cited_source_downgrades_and_stops(monkeypatch, verdict):
+    use_or_key(monkeypatch)
+    result = {**res("C1", verdict, why="모델의 설명", fact="검증되지 않은 내용",
+                    sources=["https://made-up.example.com/x"]), "public_event": True}
+    fake_post(monkeypatch, verdict_answer([result], chunks=[]))
+    r = F.verify([VCLAIM])["results"][0]
+    assert r["verdict"] == "unverified" and r["public_event"] is True
+    assert r["fact"] is None and r["sources"] == []
+    assert r["why"] == "반드시 보도될 일인데 관련 보도를 찾지 못했습니다. 인용된 출처가 없어 확인 불가로 내렸습니다. 모델의 설명"
+    assert F.overall_status([r]) == "stop"
+
+
+@pytest.mark.parametrize("verdict,status", [("true", "pass"), ("partly", "warn"), ("false", "stop")])
+def test_verify_public_event_keeps_supported_verdict_and_why(monkeypatch, verdict, status):
+    use_or_key(monkeypatch)
+    result = {**res("C1", verdict, why="보도로 확인한 내용", fact="사실", sources=[URL_A]), "public_event": True}
+    fake_post(monkeypatch, verdict_answer([result], chunks=[web(URL_A, "기사")]))
+    r = F.verify([VCLAIM])["results"][0]
+    assert r["verdict"] == verdict and r["public_event"] is True
+    assert r["why"] == "보도로 확인한 내용"
+    assert F.overall_status([r]) == status
 
 
 def test_verify_unknown_verdict_and_missing_result_become_unverified(monkeypatch):
@@ -268,6 +377,7 @@ def test_verify_unknown_verdict_and_missing_result_become_unverified(monkeypatch
     out = F.verify([VCLAIM, {**VCLAIM, "id": "C2"}])
     assert [r["id"] for r in out["results"]] == ["C1", "C2"]
     assert [r["verdict"] for r in out["results"]] == ["unverified", "unverified"]
+    assert [r["public_event"] for r in out["results"]] == [False, False]
     assert out["results"][1]["why"] == "판정 결과가 없습니다."
 
 
@@ -369,6 +479,14 @@ def test_overall_status_follows_the_verdicts(verdicts, expect):
     assert F.overall_status([{"verdict": v} for v in verdicts]) == expect
 
 
+@pytest.mark.parametrize("event_fields,status", [
+    ({"public_event": True}, "stop"), ({"public_event": False}, "warn"), ({}, "warn"),
+])
+def test_overall_status_unverified_public_event(event_fields, status):
+    results = [{"verdict": "true"}, {"verdict": "unverified", **event_fields}, {"verdict": "partly"}]
+    assert F.overall_status(results) == status
+
+
 def test_build_record_general_is_skipped_and_has_no_claims():
     rec = F.build_record(TITLE, SRC, {"kind": "general", "reason": "잡담", "claims": []}, None)
     assert rec["status"] == "skipped" and rec["kind"] == "general" and rec["claims"] == []
@@ -395,7 +513,7 @@ def test_build_record_merges_claims_and_copies_model_fields():
     rec = F.build_record(TITLE, SRC, cls, ver)
     assert rec["status"] == "stop" and rec["kind"] == "info" and rec["reason"] == "정책 발표"
     assert rec["claims"][0] == {"id": "C1", "claim": CLAIM1["claim"], "source_quote": Q1, "verdict": "partly",
-                                "why": "검토 단계", "fact": "검토 중", "sources": [SRC_A]}
+                                "why": "검토 단계", "fact": "검토 중", "sources": [SRC_A], "public_event": False}
     assert rec["claims"][1]["verdict"] == "false" and rec["claims"][1]["sources"] == []
     assert rec["overall_why"] == "두 주장 확인"
     assert rec["model"] == F.VERIFY_MODEL and rec["search"] == "exa:5" and rec["cost_usd"] == 0.07
@@ -418,7 +536,7 @@ def test_topic_additions_facts_false_and_unverified():
     rec = mk_record("warn", claims=[
         claim("C1", "true", fact="첫 사실", sources=[SRC_A]),
         claim("C2", "partly", fact="바로잡은 문장", sources=[SRC_B]),
-        claim("C3", "false"),
+        claim("C3", "false", fact="보도로 확인된 실제 내용", sources=[SRC_A]),
         claim("C4", "unverified"),
         claim("C5", "true", fact=None, sources=[SRC_A]),
         claim("C6", "true", fact="출처 없음"),
@@ -543,6 +661,31 @@ def test_save_load_round_trip_leaves_no_temp_file(tmp_path):
     F.save_record(tmp_path, rec)
     assert F.load_record(tmp_path) == rec
     assert sorted(p.name for p in tmp_path.iterdir()) == ["factcheck.json"]
+
+
+@pytest.mark.parametrize("event_fields,expected,status", [
+    ({"public_event": True}, True, "stop"), ({"public_event": False}, False, "warn"), ({}, False, "warn"),
+])
+def test_public_event_survives_verify_build_save_load_and_gate(monkeypatch, tmp_path, event_fields, expected, status):
+    use_or_key(monkeypatch)
+    result = {**res("C1", "unverified", why="관련 보도를 찾지 못했습니다."), **event_fields}
+    fake_post(monkeypatch, verdict_answer([result], chunks=[]))
+    ver = F.verify([VCLAIM])
+    cls = {"kind": "info", "claims": [VCLAIM]}
+    rec = F.build_record(TITLE, SRC, cls, ver)
+    assert rec["claims"][0]["public_event"] is expected
+    assert rec["status"] == status
+    F.save_record(tmp_path, rec)
+    saved = F.load_record(tmp_path)
+    assert saved == rec
+    assert saved["claims"][0]["public_event"] is expected
+    assert saved["claims"][0]["why"] == ver["results"][0]["why"]
+    assert F.gate(saved, TITLE, SRC, F.POLICY_VERSION) == (
+        ("blocked", STOP_MSG) if expected else ("need_ack", NEED_ACK))
+    saved["ack"] = {"at": "t", "input_hash": H}
+    assert F.gate(saved, TITLE, SRC, F.POLICY_VERSION)[0] == ("blocked" if expected else "clear")
+    saved["override"] = {"at": "t", "note": "직접 확인함", "input_hash": H}
+    assert F.gate(saved, TITLE, SRC, F.POLICY_VERSION)[0] == "clear"
 
 
 def test_load_missing_is_none(tmp_path):
