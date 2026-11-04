@@ -224,7 +224,7 @@ class FakeDeps(Deps):
         claims = [dict(c) for c in self.fc_claims] if (force or self.fc_kind != "general") else []
         return {"kind": self.fc_kind, "reason": "시험용 분류", "claims": claims}
 
-    def factcheck_verify(self, claims):
+    def factcheck_verify(self, claims, *, title="", source_text=""):
         self.hit("factcheck_verify")
         if self.fc_verify_error:
             raise F.FactcheckError(self.fc_verify_error)

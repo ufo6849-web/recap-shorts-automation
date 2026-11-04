@@ -10,7 +10,7 @@ from recap_shorts import pipeline as P
 from recap_shorts import settings, usage
 from recap_shorts.collect.http import Blocked
 from recap_shorts.images import sensitive
-from tests.pipeline.fakes import READ_TEXT, FakeLLM, png
+from tests.pipeline.fakes import READ_TEXT, FakeLLM, png, FC_CLAIM, FC_FACT, FC_SOURCE
 
 OR_URL = "https://openrouter.ai/api/v1/chat/completions"
 OR_KEY = "sk-or-test-0000000000000000"
@@ -22,8 +22,8 @@ class Resp:
     status_code = 200
     text = ""
 
-    def __init__(self, content):
-        self._d = {"choices": [{"message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+    def __init__(self, content, annotations=None):
+        self._d = {"choices": [{"message": {"role": "assistant", "content": content, "annotations": annotations or []}, "finish_reason": "stop"}],
                    "usage": {"prompt_tokens": 100, "completion_tokens": 50, "cost": 0.01}}
 
     def json(self):
@@ -45,7 +45,16 @@ class OpenRouter:
             content = {"kind": "비교표", "fan_made": False, "text": READ_TEXT, "summary": "표", "has_face": False,
                        "has_id_text": False}
         else:
-            content = self.llm.complete_json("".join(p.get("text", "") for p in parts if p["type"] == "text"))
+            prompt = "".join(p.get("text", "") for p in parts if p["type"] == "text")
+            if "너는 쇼츠 영상을 만들기 전에" in prompt:
+                content = {"kind": "info", "claims": [FC_CLAIM]}
+            elif "너는 한국어 뉴스 사실 확인 담당" in prompt:
+                content = {"results": [{"id": "C1", "verdict": "true", "fact": FC_FACT,
+                                        "sources": [FC_SOURCE["url"]]}]}
+                return Resp(json.dumps(content, ensure_ascii=False), annotations=[
+                    {"url_citation": {"url": FC_SOURCE["url"], "title": FC_SOURCE["title"]}}])
+            else:
+                content = self.llm.complete_json(prompt)
         return Resp(json.dumps(content, ensure_ascii=False))
 
 

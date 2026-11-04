@@ -289,3 +289,21 @@ def test_prompt_has_fact_blocks_only_when_present():
                  "(C3) 매출이 세 배로 늘었다", "(F1) 축산신문 보도"):
         assert must in p, must
     assert p.index("[확인된 사실") < p.index("[사실 아님 주장") < p.index("[확인되지 않은 주장") < p.index("[사실 확인 규칙") < p.index(RULES.splitlines()[0])
+
+
+def test_blend_keeps_news_rule_scores_even_with_clef():
+    heur = [[0.0, 0.85, 0.2], [0.95, 0.0, 0.2]]
+    clef = [[1.0, 0.0, 1.0], [0.0, 1.0, 1.0]]
+    assert arrange.blend(heur, clef, news={0, 1}) == [[0.0, 0.85, 0.6], [0.95, 0.0, 0.6]]
+
+
+def test_build_plan_clef_keeps_news_zero(tmp_path, monkeypatch):
+    for folder in ("script_final", "voice"):
+        (tmp_path / folder).mkdir()
+    (tmp_path / "script_final/script.json").write_text(json.dumps({"sentences": [{"text": "무관한 일상 이야기", "evidence": "다른 근거"}]}))
+    (tmp_path / "voice/timings.json").write_text(json.dumps({
+        "duration": 3, "sentences": [{"index": 1, "role": "body", "text": "무관한 일상 이야기", "start": 0, "end": 3}]}))
+    monkeypatch.setattr(P, "load_assets", lambda job: [{"file": "cap.png", "kind": "cap"}, NEWS])
+    deps = SimpleNamespace(clef_fit_matrix=lambda *a: [[0.5, 1.0]])
+    doc = P.build_plan(SimpleNamespace(dir=tmp_path, options={"clef_scene_fit": True}), deps)
+    assert doc["scores"]["1"][NEWS["file"]] == 0.0
