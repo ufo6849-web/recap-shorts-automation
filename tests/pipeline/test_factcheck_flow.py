@@ -67,7 +67,7 @@ def three_sources_deps() -> FakeDeps:
 @contextmanager
 def app_client(root: Path, deps: FakeDeps):
     app = create_app(work_root=root, deps=deps)
-    with TestClient(app, base_url=BASE) as c:
+    with TestClient(app, client=("127.0.0.1", 50000), base_url=BASE) as c:
         yield app, c
 
 

@@ -11,6 +11,7 @@ POST /assets/blur(사람이 그린 사각형을 모자이크하고 캡처 카드
 from __future__ import annotations
 
 import json
+import ipaddress
 import os
 import re
 import shutil
@@ -243,7 +244,15 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
 
     # ---------------------------------------------------------------- 설정(키·AI 그림 엔진)
     def local_only(request: Request) -> None:
-        """/api/settings* 는 이 컴퓨터에서만: Host·Origin 머리말의 호스트가 127.0.0.1/localhost/::1 이어야 한다."""
+        """소켓 peer와 Host·Origin이 모두 로컬이어야 한다. 전달 헤더는 믿지 않는다."""
+        try:
+            peer = ipaddress.ip_address(request.client.host) if request.client else None
+            if isinstance(peer, ipaddress.IPv6Address) and peer.ipv4_mapped:
+                peer = peer.ipv4_mapped
+        except ValueError:
+            peer = None
+        if peer is None or not peer.is_loopback:
+            raise HTTPException(403, "이 컴퓨터에서만 설정을 바꿀 수 있습니다")
         allowed = ("127.0.0.1", "localhost", "::1")
 
         def host_only(v: str) -> str:

@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import math
@@ -29,11 +30,87 @@ KST = timezone(timedelta(hours=9))
 KINDS = {"news", "general", "uncertain"}
 STATUSES = {"true", "partly", "false", "unverified", "failed"}
 STALE = "목록이 바뀌어 다시 눌러 주세요"
-TIMEOUT_NOTE = "시간 초과한 요청이 남아 있을 수 있습니다. 서버를 재시작한 뒤 다시 확인해 주세요"
+TIMEOUT_NOTE = "앞선 확인이 아직 끝나지 않았습니다. 잠시 뒤 다시 눌러 주세요."
+BUSY_NOTE = "다른 창에서 확인 중입니다"
 
 
 class Conflict(ValueError):
     """HTTP 409로 전달하는 사용자 메시지."""
+
+
+class _FileLock:
+    """같은 보관 폴더의 별도 핸들/프로세스도 배제한다. 파일은 삭제하지 않는다."""
+
+    def __init__(self, path: Path, *, blocking: bool = True):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.file = path.open("a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+                while True:
+                    self.file.seek(0)
+                    try:
+                        msvcrt.locking(self.file.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError as exc:
+                        if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                            raise
+                        if not blocking:
+                            raise Conflict(BUSY_NOTE) from None
+                        time.sleep(.05)
+            else:
+                import fcntl
+                try:
+                    fcntl.flock(self.file, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+                except BlockingIOError:
+                    raise Conflict(BUSY_NOTE) from None
+        except BaseException:
+            self.file.close()
+            raise
+
+    def close(self):
+        # close는 POSIX/Windows 모두 잠금을 해제하며 프로세스 종료 때도 같다.
+        self.file.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+class _RequestTimeout(F.FactcheckError):
+    def __init__(self, thread, result):
+        super().__init__("사실 확인 전체 제한 시간을 넘었습니다. " + TIMEOUT_NOTE)
+        self.thread, self.result = thread, result
+
+
+def _tracked_ask(stage, model, body, timeout, *, strict_json=False):
+    """소재 요청만 추적한다. 공용 엔진의 전역 함수/다른 작업자는 바꾸지 않는다."""
+    result = {}
+
+    def request():
+        try:
+            result["response"] = F.G._post(model, body, timeout=timeout, total_timeout=timeout)
+        except Exception as exc:
+            result["error"] = exc
+
+    thread = threading.Thread(target=request, name="topic-factcheck-request", daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        raise _RequestTimeout(thread, result)
+    if "error" in result:
+        raise F._api_error(stage, result["error"]) from None
+    response = result["response"]
+    try:
+        text = F.G._text_of(response)
+        out = json.loads(text) if strict_json else F.parse_json_loose(text)
+        if not isinstance(out, dict):
+            raise ValueError("JSON object required")
+    except Exception:
+        raise F.FactcheckError(f"사실 확인 {stage} 답을 읽지 못했습니다. 다시 확인해 주세요.") from None
+    return out, response
 
 
 def title_hash(title: str) -> str:
@@ -142,7 +219,7 @@ def live_llm(prompt: str, model: str):
     if os.environ.get("PYTEST_CURRENT_TEST"):
         raise RuntimeError("시험 중 실제 분류 호출은 금지합니다")
     try:
-        answer, _ = F._ask("소재 분류", model, F._body(prompt), timeout=30, strict_json=True)
+        answer, _ = _tracked_ask("소재 분류", model, F._body(prompt), timeout=30, strict_json=True)
     except F.FactcheckError as exc:
         if "답을 읽지 못했습니다" in str(exc):
             return {}  # 잘린 JSON도 전체 uncertain으로 남긴다.
@@ -150,10 +227,39 @@ def live_llm(prompt: str, model: str):
     return answer
 
 
-def live_verify(*args, **kwargs):
+def live_verify(claims, *, title="", source_text=""):
     if os.environ.get("PYTEST_CURRENT_TEST"):
         raise RuntimeError("시험 중 실제 판정 호출은 금지합니다")
-    return F.verify(*args, **kwargs)
+    if not F.G._openrouter_key():
+        raise F.FactcheckError(F.NO_OR_KEY)
+    # 공용 verify의 전송부는 시간 초과 뒤 핸들을 버린다. 소재용 전송부만 분리하고
+    # 프롬프트/비신뢰 경계/검색 인용 검증은 같은 엔진의 도우미를 사용한다.
+    out, response = _tracked_ask("판정", F.VERIFY_MODEL,
+        F._body(F._verify_prompt(claims, title, source_text), tools=[{"google_search": {}}]), timeout=120)
+    cited = F._citations(response)
+    got = {r.get("id"): r for r in out.get("results") or [] if isinstance(r, dict)}
+    results = []
+    for claim in claims:
+        row = got.get(claim["id"]) or {}
+        verdict = str(row.get("verdict") or "").strip().lower()
+        if verdict not in F.VERDICTS:
+            verdict = "unverified"
+        public = row.get("public_event") is True
+        why = str(row.get("why") or "").strip() if row else "판정 결과가 없습니다."
+        sources = F._sources(row.get("sources"), cited)
+        if verdict in ("true", "partly") and not sources:
+            verdict = "unverified"
+            why = "인용된 출처가 없어 확인 불가로 내렸습니다." + (f" {why}" if public and why else "")
+        if verdict == "unverified" and public:
+            why = "반드시 보도될 일인데 관련 보도를 찾지 못했습니다." + (f" {why}" if why else "")
+        results.append({"id": claim["id"], "verdict": verdict, "public_event": public,
+                        "why": why, "sources": sources})
+    return {"results": results, "model": F.VERIFY_MODEL, "cost_usd": _response_cost(response)}
+
+
+def _response_cost(response):
+    usage = response.get("usageMetadata") if isinstance(response, dict) else None
+    return _money(usage.get("costUsd")) if isinstance(usage, dict) else None
 
 
 def verdict_record(title: str, kind: str, answer: dict, now: float) -> dict:
@@ -214,6 +320,7 @@ class TopicFactcheck:
         self.thread = None
         self.cancelled = threading.Event()
         self.request_timed_out = False
+        self._pending = None
         self._state = {"run_id": None, "source": None, "state": "idle", "done": 0, "total": 0,
                        "cost_usd": 0.0, "stop_reason": None, "error": None}
 
@@ -234,11 +341,70 @@ class TopicFactcheck:
         return datetime.fromtimestamp(self.clock(), KST).date().isoformat()
 
     def _budget(self) -> tuple[dict, float]:
+        with _FileLock(self.cache / "_fc_budget.lock"):
+            return self._budget_unlocked(self._day())
+
+    def _budget_unlocked(self, day) -> tuple[dict, float]:
         path = self.cache / "_fc_budget.json"
         ledger = _read(path)
         if path.exists() and (not ledger or any(_money(v) is None for v in ledger.values())):
             raise Conflict("비용 장부를 읽지 못했습니다. 보관 파일을 확인해 주세요")
-        return ledger, ledger.get(self._day(), 0.0)
+        return ledger, ledger.get(day, 0.0)
+
+    def _reserve(self, expected):
+        with _FileLock(self.cache / "_fc_budget.lock"):
+            day = self._day()
+            ledger, spent = self._budget_unlocked(day)
+            if spent + expected > self._daily_limit() + 1e-9:
+                return None
+            ledger[day] = spent + expected
+            self._save(self.cache / "_fc_budget.json", ledger)
+            return day
+
+    def _settle(self, day, expected, charged):
+        with _FileLock(self.cache / "_fc_budget.lock"):
+            ledger, _ = self._budget_unlocked(day)
+            ledger[day] = max(0.0, ledger.get(day, 0.0) + charged - expected)
+            self._save(self.cache / "_fc_budget.json", ledger)
+
+    def _refresh_pending(self):
+        # 호출자는 self.lock을 잡는다. 비용 정산 성공 전에는 lease를 놓지 않는다.
+        pending = self._pending
+        if not pending or pending["request"].thread.is_alive():
+            return
+        actual = _response_cost(pending["request"].result.get("response"))
+        if pending["day"] is not None and actual is not None:
+            self._settle(pending["day"], pending["expected"], actual)
+            if pending["count_run"]:
+                self._state["cost_usd"] = round(self._state["cost_usd"] + actual - pending["expected"], 8)
+        pending["lease"].close()
+        self._pending = None
+        self.request_timed_out = False
+        if self._state["error"] == TIMEOUT_NOTE:
+            self._state["error"] = None
+
+    def _hold_pending(self, request, lease, *, day=None, expected=0, count_run=True):
+        self._pending = {"request": request, "lease": lease, "day": day, "expected": expected, "count_run": count_run}
+        self.request_timed_out = True
+        self._state["error"] = TIMEOUT_NOTE
+
+        def watch():
+            request.thread.join()
+            with self.lock:
+                try:
+                    self._refresh_pending()
+                except Exception:
+                    # 장부 장애 때 lease를 유지한다. 다음 status/start에서 다시 정산한다.
+                    self._state["error"] = "비용 장부를 처리하지 못했습니다. 보관 파일을 확인해 주세요"
+        try:
+            threading.Thread(target=watch, name="topic-factcheck-recovery", daemon=True).start()
+        except RuntimeError:
+            pass  # 요청 핸들은 보관하므로 다음 상태 조회에서 자동 회복한다.
+
+    def _release_unless_pending(self, lease):
+        with self.lock:
+            if not self._pending or self._pending["lease"] is not lease:
+                lease.close()
 
     def _daily_limit(self) -> float:
         value = _money(_read(self.config_path).get("daily_limit_usd"))
@@ -257,8 +423,10 @@ class TopicFactcheck:
                 counts["news"] += rec["kind"] != "general"
                 counts["checked"] += checked(rec, self.clock())
                 counts["doubt"] += bool(checked(rec, self.clock()) and chip(rec) and chip(rec)["color"] == "bad")
-        ready = bool(self.ready()) and not self.request_timed_out
-        note = TIMEOUT_NOTE if self.request_timed_out else ("" if ready else F.NO_OR_KEY)
+        with self.lock:
+            self._refresh_pending()
+            ready = bool(self.ready()) and not self.request_timed_out
+            note = TIMEOUT_NOTE if self.request_timed_out else ("" if ready else F.NO_OR_KEY)
         return {"fc_counts": counts, "fc_ready": ready, "fc_note": note}
 
     def estimate(self, source: str, items: list[dict], *, force: bool = False) -> dict:
@@ -268,23 +436,29 @@ class TopicFactcheck:
             raise Conflict(F.NO_OR_KEY)
         with self.estimate_lock:
             with self.lock:
+                self._refresh_pending()
                 if self.request_timed_out:
                     raise Conflict(TIMEOUT_NOTE)
             missing = [i for i in items if not read_record(self.cache, source, i["no"], i["title"])]
             if missing:
+                lease = _FileLock(self.cache / "_fc_run.lock", blocking=False)
+                day = self._day()
                 try:
+                    # 다른 프로세스가 방금 분류/판정을 저장했을 수도 있다.
+                    missing = [i for i in missing if not read_record(self.cache, source, i["no"], i["title"])]
                     kinds = classify_batch([i["title"] for i in missing], self.llm)
-                except Exception as exc:
-                    if stop_reason(exc) == "request_timeout":
-                        with self.lock:
-                            self.request_timed_out = True
+                    with self.lock:
+                        for item, kind in zip(missing, kinds):
+                            if not read_record(self.cache, source, item["no"], item["title"]):
+                                self._save(_path(self.cache, source, item["no"]), {
+                                    "v": TOPIC_FC_VERSION, "title_hash": title_hash(item["title"]),
+                                    "kind": kind, "status": None})
+                except _RequestTimeout as exc:
+                    with self.lock:
+                        self._hold_pending(exc, lease, day=day, count_run=False)
                     raise
-                with self.lock:
-                    for item, kind in zip(missing, kinds):
-                        if not read_record(self.cache, source, item["no"], item["title"]):
-                            self._save(_path(self.cache, source, item["no"]), {
-                                "v": TOPIC_FC_VERSION, "title_hash": title_hash(item["title"]),
-                                "kind": kind, "status": None})
+                finally:
+                    self._release_unless_pending(lease)
             with self.lock:
                 candidates, done, news = [], 0, 0
                 for item in items:
@@ -305,7 +479,7 @@ class TopicFactcheck:
                     self.snapshots.pop(next(iter(self.snapshots)))
                 run_id = secrets.token_urlsafe(24)
                 todo = candidates[:BATCH]
-                self.snapshots[run_id] = {"source": source, "items": todo, "created": now, "per_item_usd": cost}
+                self.snapshots[run_id] = {"source": source, "items": todo, "created": now, "per_item_usd": cost, "force": force}
                 return {"run_id": run_id, "news": news, "todo": len(todo), "done": done,
                         "est_usd": round(len(todo) * cost, 6), "per_item_usd": cost, "capped": len(candidates) > BATCH,
                         # 다음 묶음은 status.done개만큼 이 순서에서 제외한 nos로 견적한다.
@@ -313,10 +487,12 @@ class TopicFactcheck:
 
     def status(self) -> dict:
         with self.lock:
+            self._refresh_pending()
             return dict(self._state)
 
     def start(self, run_id: str) -> dict:
         with self.lock:
+            self._refresh_pending()
             if self.request_timed_out:
                 raise Conflict(TIMEOUT_NOTE)
             if self._state["state"] in ("running", "cancelling"):
@@ -326,20 +502,35 @@ class TopicFactcheck:
                 raise Conflict(STALE)
             if not self.ready():
                 raise Conflict(F.NO_OR_KEY)
-            _, spent = self._budget()
-            if spent >= self._daily_limit() or (snapshot["items"] and spent + snapshot["per_item_usd"] > self._daily_limit()):
-                raise Conflict("소재 사실 확인의 하루 비용 상한에 도달했습니다")
-            self.cancelled.clear()
-            self._state = {"run_id": run_id, "source": snapshot["source"], "state": "running", "done": 0,
-                           "total": len(snapshot["items"]), "cost_usd": 0.0, "stop_reason": None, "error": None}
-            self.thread = threading.Thread(target=self._work, args=(snapshot,), name="topic-factcheck", daemon=True)
+            lease = _FileLock(self.cache / "_fc_run.lock", blocking=False)
             try:
-                self.thread.start()
-            except Exception:
-                self._state.update(state="failed", error="판정 작업자를 시작하지 못했습니다")
-                raise Conflict(self._state["error"]) from None
-            self.snapshots.pop(run_id)
-            return {"started": True, "total": len(snapshot["items"]), "run_id": run_id}
+                snapshot = dict(snapshot)
+                if not snapshot["force"]:
+                    snapshot["items"] = [i for i in snapshot["items"] if not checked(
+                        read_record(self.cache, snapshot["source"], i["no"], i["title"]), self.clock())]
+                if snapshot["items"]:
+                    _, spent = self._budget()
+                    if spent >= self._daily_limit() or spent + snapshot["per_item_usd"] > self._daily_limit() + 1e-9:
+                        raise Conflict("소재 사실 확인의 하루 비용 상한에 도달했습니다")
+                self.cancelled.clear()
+                self._state = {"run_id": run_id, "source": snapshot["source"], "state": "running", "done": 0,
+                               "total": len(snapshot["items"]), "cost_usd": 0.0, "stop_reason": None, "error": None}
+                self.thread = None
+                if snapshot["items"]:
+                    self.thread = threading.Thread(target=self._work, args=(snapshot, lease), name="topic-factcheck", daemon=True)
+                    try:
+                        self.thread.start()
+                    except Exception:
+                        self._state.update(state="failed", error="판정 작업자를 시작하지 못했습니다")
+                        raise Conflict(self._state["error"]) from None
+                else:
+                    self._state["state"] = "done"
+                    lease.close()
+                self.snapshots.pop(run_id)
+                return {"started": True, "total": len(snapshot["items"]), "run_id": run_id}
+            except BaseException:
+                lease.close()
+                raise
 
     def cancel(self) -> dict:
         with self.lock:
@@ -351,7 +542,8 @@ class TopicFactcheck:
     def _stop(self, reason: str):
         self._state.update(state="stopped", stop_reason=reason)
 
-    def _work(self, snapshot: dict):
+    def _work(self, snapshot: dict, lease):
+        pending = None
         try:
             for item in snapshot["items"]:
                 expected = snapshot["per_item_usd"]
@@ -365,20 +557,19 @@ class TopicFactcheck:
                     if self._state["cost_usd"] + expected > RUN_LIMIT + 1e-9:
                         self._stop("run_limit")
                         return
-                    ledger, spent = self._budget()
-                    if spent + expected > self._daily_limit() + 1e-9:
+                    day = self._reserve(expected)
+                    if day is None:
                         self._stop("daily_limit")
                         return
-                    day = self._day()
-                    ledger[day] = spent + expected
-                    self._save(self.cache / "_fc_budget.json", ledger)
-                answer, reason = None, None
+                answer, reason, pending = None, None, None
                 try:
                     answer = self.verify([{"id": "C1", "claim": item["title"], "query": item["title"]}],
                                          title=item["title"], source_text="")
                     rec = verdict_record(item["title"], item["kind"], answer, self.clock())
                 except Exception as exc:  # 항목 오류 원문/비밀값은 응답에 포함하지 않는다.
                     reason = stop_reason(exc)
+                    if isinstance(exc, _RequestTimeout):
+                        pending = exc
                     rec = {"v": TOPIC_FC_VERSION, "title_hash": item["title_hash"], "kind": item["kind"],
                            "status": "failed", "why": "확인에 실패했습니다. 다시 시도해 주세요.", "sources": [],
                            "public_event": False, "model": F.VERIFY_MODEL, "cost_usd": None,
@@ -386,10 +577,9 @@ class TopicFactcheck:
                 actual = _money(answer.get("cost_usd")) if isinstance(answer, dict) else None
                 charged = expected if actual is None else actual
                 with self.lock:
-                    ledger, _ = self._budget()
-                    ledger[day] = max(0.0, ledger.get(day, 0.0) + charged - expected)
-                    self._save(self.cache / "_fc_budget.json", ledger)
                     self._state["cost_usd"] = round(self._state["cost_usd"] + charged, 8)
+                    if actual is not None:
+                        self._settle(day, expected, charged)
                     path = _path(self.cache, snapshot["source"], item["no"])
                     current = _read(path)
                     # 실행 도중 새 제목을 분류했다면 낡은 스냅샷 결과로 덮지 않는다.
@@ -397,9 +587,8 @@ class TopicFactcheck:
                         self._save(path, rec)
                     self._state["done"] += 1
                     if reason:
-                        if reason == "request_timeout":
-                            self.request_timed_out = True
-                            self._state["error"] = "요청 시간이 초과되었습니다. 서버를 재시작한 뒤 다시 확인해 주세요"
+                        if pending:
+                            self._state["error"] = TIMEOUT_NOTE
                         self._stop(reason)
                         return
             with self.lock:
@@ -410,3 +599,8 @@ class TopicFactcheck:
         except Exception:
             with self.lock:
                 self._state.update(state="failed", stop_reason="storage_error", error="판정 기록 또는 비용 장부를 처리하지 못했습니다")
+        finally:
+            if pending:
+                with self.lock:
+                    self._hold_pending(pending, lease, day=day, expected=expected)
+            self._release_unless_pending(lease)

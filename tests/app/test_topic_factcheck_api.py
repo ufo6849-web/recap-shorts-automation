@@ -145,7 +145,7 @@ def test_unit_all_routes_local_only(app_env, suffix):
     for host, origin, allowed in [(b"localhost", b"http://localhost:5173", True),
                                    (b"remote.example", b"http://localhost", False),
                                    (b"localhost", b"https://remote.example", False)]:
-        request = Request({"type": "http", "headers": [(b"host", host), (b"origin", origin)]})
+        request = Request({"type": "http", "client": ("127.0.0.1", 50000), "headers": [(b"host", host), (b"origin", origin)]})
         if allowed:
             guard(request)
         else:
@@ -168,7 +168,7 @@ def test_unit_classification_error_is_sanitized(app_env):
 
 def test_http_roundtrip(app_env):
     app, service, _ = app_env
-    with TestClient(app, base_url="http://localhost") as client:
+    with TestClient(app, client=("127.0.0.1", 50000), base_url="http://localhost") as client:
         assert client.get("/api/topics", params={"source": "dcbest"}).status_code == 200
         quoted = client.post(PREFIX + "/estimate", json={"source": "dcbest", "nos": [1]}).json()
         response = client.post(PREFIX + "/run", json={"run_id": quoted["run_id"]})
@@ -183,6 +183,35 @@ def test_http_roundtrip(app_env):
 @pytest.mark.parametrize("method,suffix", [("post", "estimate"), ("post", "run"), ("get", "status"), ("post", "cancel")])
 def test_http_local_only(app_env, method, suffix):
     app, _, _ = app_env
-    with TestClient(app, base_url="http://localhost") as client:
+    with TestClient(app, client=("127.0.0.1", 50000), base_url="http://localhost") as client:
         assert client.request(method, PREFIX + "/" + suffix, headers={"Origin": "https://evil.example"}, json={}).status_code == 403
         assert client.request(method, PREFIX + "/" + suffix, headers={"Host": "evil.example"}, json={}).status_code == 403
+
+
+@pytest.mark.parametrize("peer,allowed", [
+    ("127.0.0.1", True), ("::1", True), ("::ffff:127.0.0.1", True),
+    ("203.0.113.5", False), ("::ffff:203.0.113.5", False), ("testclient", False), (None, False),
+])
+def test_unit_local_only_socket_peer(app_env, peer, allowed):
+    app, _, _ = app_env
+    route = next(r for r in app.routes if getattr(r, "path", "") == PREFIX + "/run")
+    guard = next(d.call for d in route.dependant.dependencies if d.call.__name__ == "local_only")
+    request = Request({"type": "http", "client": (peer, 50000) if peer else None,
+                       "headers": [(b"host", b"localhost"), (b"x-forwarded-for", b"127.0.0.1")]})
+    if allowed:
+        guard(request)
+    else:
+        with pytest.raises(HTTPException) as exc:
+            guard(request)
+        assert exc.value.status_code == 403
+
+
+@pytest.mark.parametrize("method,path", [
+    ("post", PREFIX + "/estimate"), ("post", PREFIX + "/run"),
+    ("get", PREFIX + "/status"), ("post", PREFIX + "/cancel"), ("get", "/api/settings"),
+])
+def test_http_remote_peer_cannot_spoof_localhost(app_env, method, path):
+    app, _, _ = app_env
+    with TestClient(app, base_url="http://localhost", client=("203.0.113.5", 50000)) as client:
+        response = client.request(method, path, headers={"Host": "localhost", "X-Forwarded-For": "127.0.0.1"}, json={})
+        assert response.status_code == 403

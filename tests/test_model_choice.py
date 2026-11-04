@@ -202,7 +202,7 @@ def test_settings_api_models_and_voice(tmp_path, monkeypatch):
     monkeypatch.setattr(provider, "local_server_up", lambda: False)
     monkeypatch.setattr(modelfiles, "ok", lambda mid: mid == "sensevoice")
     app = create_app(work_root=tmp_path, deps=FakeDeps(), start_runner=False)
-    with TestClient(app, base_url="http://127.0.0.1:8020") as cl:
+    with TestClient(app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1:8020") as cl:
         d = cl.put("/api/settings", json={"models": {"tts": "gemini-3.8-flash-lite-tts"}}).json()
         assert next(r for r in d["model_roles"] if r["role"] == "tts")["value"] == "gemini-3.8-flash-lite-tts"
         r = cl.put("/api/settings", json={"voice": {"engine": "supertonic"}})
@@ -282,7 +282,7 @@ def test_preview_api(tmp_path, monkeypatch):
     _fake_tts(monkeypatch, calls)
     settings.save({"gemini_api_key": "test-gemini-key-0000000000"})
     app = create_app(work_root=tmp_path, deps=FakeDeps(), start_runner=False)
-    with TestClient(app, base_url="http://127.0.0.1:8020") as cl:
+    with TestClient(app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1:8020") as cl:
         r = cl.post("/api/settings/voice/preview", json={"engine": "gemini", "voice": "Erinome"})
         assert r.status_code == 200 and r.headers["content-type"] == "audio/wav" and r.headers["x-preview-cached"] == "0"
         r = cl.post("/api/settings/voice/preview", json={"engine": "gemini", "voice": "Erinome"})
