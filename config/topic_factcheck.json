@@ -1,3 +1,4 @@
 {
-  "daily_limit_usd": 5.0
+  "daily_limit_usd": 5.0,
+  "classification_batch_usd": 0.01
 }

@@ -162,7 +162,7 @@ def test_p90_and_none_cost(env):
     estimate = service.estimate("blind", [{"no": "test1", "title": "사건"}])
     assert estimate["est_usd"] == .09
     assert run(service, estimate)["cost_usd"] == .09
-    assert service._budget()[1] == pytest.approx(.09)
+    assert service._budget()[1] == pytest.approx(.10)
     rec = T.read_record(service.cache, "blind", "test1", "사건")
     assert rec["cost_usd"] is None
 
@@ -190,7 +190,7 @@ def test_daily_limit_restart_recheck_and_kst(env):
         service.start(estimate["run_id"])
     restarted = T.TopicFactcheck(service.cache, ready=lambda: True, clock=service.clock, config_path=config)
     assert restarted.status()["state"] == "idle"
-    assert restarted._budget()[1] == pytest.approx(.1)
+    assert restarted._budget()[1] == pytest.approx(.11)
     now[0] = datetime(2026, 11, 4, 15, tzinfo=timezone.utc).timestamp()  # KST 자정
     assert restarted._budget()[1] == 0
 
@@ -367,7 +367,7 @@ def test_timeout_holds_lease_until_thread_ends_and_settles(env, monkeypatch, cos
                 action()
         with pytest.raises(T.Conflict, match="다른 창"):
             other.start(second["run_id"])
-        assert service._budget()[1] == pytest.approx(.08)
+        assert service._budget()[1] == pytest.approx(.09)
         now[0] += 86400  # 늦은 정산도 예약한 KST 날짜에 귀속한다.
     finally:
         release.set()
@@ -377,7 +377,7 @@ def test_timeout_holds_lease_until_thread_ends_and_settles(env, monkeypatch, cos
     assert not service.request_timed_out and state["error"] is None
     assert state["cost_usd"] == pytest.approx(.08 if cost is None else cost)
     ledger = T._read(service.cache / "_fc_budget.json")
-    assert ledger[day] == pytest.approx(.08 if cost is None else cost)
+    assert ledger[day] == pytest.approx(.01 + (.08 if cost is None else cost))
     with T._FileLock(service.cache / "_fc_run.lock", blocking=False):
         pass
     service.verify = lambda *a, **kw: answer()
@@ -469,7 +469,7 @@ def test_budget_reservation_exists_before_verify_and_rechecks_accumulate(env):
     service.verify = verify
     run(service, service.estimate("dcbest", rows()))
     run(service, service.estimate("dcbest", rows(), force=True))
-    assert service._budget()[1] == pytest.approx(.24)
+    assert service._budget()[1] == pytest.approx(.25)
 
 
 def test_live_parser_failure_becomes_uncertain_without_network(monkeypatch):
@@ -487,7 +487,7 @@ def test_no_news_estimate_and_empty_run(env):
     estimate = service.estimate("dcbest", rows())
     assert estimate["news"] == estimate["todo"] == estimate["done"] == estimate["est_usd"] == 0
     assert run(service, estimate)["state"] == "done"
-    assert not (service.cache / "_fc_budget.json").exists()
+    assert service._budget()[1] == pytest.approx(.01)
 
 
 def _child_lock_probe(path, connection):
@@ -622,7 +622,7 @@ def test_two_services_share_one_worker_and_recheck_cache(env):
         service.thread.join(5)
     for quoted in (second, during):
         assert run(other, quoted)["total"] == 0
-    assert service._budget()[1] == pytest.approx(.06)
+    assert service._budget()[1] == pytest.approx(.07)
 
 
 @pytest.mark.parametrize("force,remaining", [(False, 1), (True, 2)])
@@ -633,7 +633,7 @@ def test_old_snapshot_filters_completed_items_unless_forced(env, force, remainin
     state = run(service, old)
     assert state["total"] == state["done"] == remaining
     assert state["cost_usd"] == pytest.approx(remaining * .06)
-    assert service._budget()[1] == pytest.approx((remaining + 1) * .06)
+    assert service._budget()[1] == pytest.approx(.01 + (remaining + 1) * .06)
 
 
 def test_all_cached_snapshot_finishes_even_when_budget_exhausted(env):
@@ -658,7 +658,8 @@ def test_thread_start_failure_releases_lease(env, monkeypatch):
         pass
 
 
-def test_classifier_late_cost_is_charged_before_automatic_unlock(env, monkeypatch):
+@pytest.mark.parametrize("cost", [.003, None])
+def test_classifier_late_cost_is_charged_before_automatic_unlock(env, monkeypatch, cost):
     service, now = env
     release, recovered = threading.Event(), threading.Event()
     requests = []
@@ -670,7 +671,7 @@ def test_classifier_late_cost_is_charged_before_automatic_unlock(env, monkeypatc
     monkeypatch.setattr(service, "_refresh_pending", refresh)
     def post(*a, **kw):
         assert release.wait(5)
-        return {"usageMetadata": {"costUsd": .003}}
+        return {"usageMetadata": {"costUsd": cost}}
     monkeypatch.setattr(F.G, "_post", post)
     def llm(*a):
         try:
@@ -683,6 +684,7 @@ def test_classifier_late_cost_is_charged_before_automatic_unlock(env, monkeypatc
     try:
         with pytest.raises(T._RequestTimeout):
             service.estimate("dcbest", rows())
+        assert service._budget()[1] == pytest.approx(.01)
         recovered.clear()
         now[0] += 86400
     finally:
@@ -692,7 +694,7 @@ def test_classifier_late_cost_is_charged_before_automatic_unlock(env, monkeypatc
     # 상태 조회를 하지 않아도 관찰 스레드가 정산하고 lease를 해제한다.
     assert recovered.wait(5)
     with T._FileLock(service.cache / "_fc_run.lock", blocking=False):
-        assert T._read(service.cache / "_fc_budget.json")[day] == pytest.approx(.003)
+        assert T._read(service.cache / "_fc_budget.json")[day] == pytest.approx(.01 if cost is None else cost)
     assert service.status()["cost_usd"] == 0
     assert service.status()["error"] is None
 
@@ -731,3 +733,170 @@ def test_tracked_transport_keeps_quota_stop_reason(monkeypatch, code):
         T._tracked_ask("판정", "test", {}, 1)
     assert T.stop_reason(exc.value) in (f"http_{code}", "quota")
     assert "비밀값" not in str(exc.value)
+
+
+@pytest.mark.parametrize("cost", [.003, 0, None])
+@pytest.mark.parametrize("valid_json", [True, False])
+def test_live_classification_reserves_and_settles_original_day(env, monkeypatch, cost, valid_json):
+    service, now = env
+    day = service._day()
+    monkeypatch.delenv("PYTEST_CURRENT_TEST")
+    def post(*args, **kwargs):
+        assert service._budget()[1] == pytest.approx(.01)
+        now[0] += 86400
+        payload = json.dumps({"items": [{"i": 1, "kind": "general"}], "cost_usd": 999}) if valid_json else '{"items":['
+        return {"candidates": [{"content": {"parts": [{"text": payload}]}}],
+                "usageMetadata": {"costUsd": cost}}
+    monkeypatch.setattr(F.G, "_post", post)
+    service.llm = T.live_llm
+    quoted = service.estimate("dcbest", rows())
+    charged = .01 if cost is None else cost
+    assert quoted["classification_usd"] == pytest.approx(charged)
+    assert T._read(service.cache / "_fc_budget.json")[day] == pytest.approx(charged)
+    assert service._budget()[1] == 0
+    assert service.estimate("dcbest", rows())["classification_usd"] == 0
+    assert T.read_record(service.cache, "dcbest", 1, rows()[0]["title"])["kind"] == ("general" if valid_json else "uncertain")
+
+
+@pytest.mark.parametrize("value", [None, 0, -1, True, "0.01"])
+def test_classification_cost_defaults_conservatively(env, value):
+    service, _ = env
+    service.config_path = service.cache / "config.json"
+    F.atomic_json(service.config_path, {"classification_batch_usd": value})
+    assert service.estimate("dcbest", rows())["classification_usd"] == .01
+    assert service._budget()[1] == pytest.approx(.01)
+
+
+@pytest.mark.parametrize("spent", [4.95, 5])
+def test_classification_budget_blocks_before_network(env, spent):
+    service, _ = env
+    service.config_path = service.cache / "config.json"
+    F.atomic_json(service.config_path, {"classification_batch_usd": .1})
+    F.atomic_json(service.cache / "_fc_budget.json", {service._day(): spent})
+    service.llm = lambda *a: pytest.fail("예산이 없으면 호출 금지")
+    with pytest.raises(T.Conflict, match="하루"):
+        service.estimate("dcbest", rows())
+    assert service._budget()[1] == spent
+    with T._FileLock(service.cache / "_fc_run.lock", blocking=False):
+        pass
+
+
+def test_classification_each_batch_rechecks_budget_and_preserves_completed_cache(env):
+    service, _ = env
+    calls = []
+    F.atomic_json(service.cache / "_fc_budget.json", {service._day(): 4.98})
+    def llm(*args):
+        calls.append(args)
+        assert service._budget()[1] == pytest.approx(4.99)
+        return {"cost_usd": .02}
+    service.llm = llm
+    with pytest.raises(T.Conflict, match="하루"):
+        service.estimate("dcbest", rows(31))
+    assert len(calls) == 1 and service._budget()[1] == pytest.approx(5)
+    assert T.read_record(service.cache, "dcbest", 30, rows(30)[-1]["title"])
+    assert not T.read_record(service.cache, "dcbest", 31, rows(31)[-1]["title"])
+    assert service.estimate("dcbest", rows(30))["classification_usd"] == 0
+    with pytest.raises(T.Conflict, match="하루"):
+        service.estimate("blind", rows())
+    assert len(calls) == 1
+
+
+def test_classification_multiple_batches_accumulate_and_error_keeps_reservation(env):
+    service, _ = env
+    service.llm = lambda *a: {"cost_usd": .02}
+    quoted = service.estimate("dcbest", rows(61))
+    assert quoted["classification_usd"] == pytest.approx(.06)
+    assert service._budget()[1] == pytest.approx(.06)
+    def fail(*a):
+        raise RuntimeError("공급자 오류")
+    service.llm = fail
+    with pytest.raises(RuntimeError):
+        service.estimate("blind", rows())
+    assert service._budget()[1] == pytest.approx(.07)
+
+
+@pytest.mark.parametrize("kind", ["classification", "verify"])
+@pytest.mark.parametrize("failure", ["corrupt", "io"])
+def test_late_settlement_failure_status_and_annotations_recover(env, monkeypatch, kind, failure):
+    service, now = env
+    quoted = service.estimate("dcbest", rows())
+    release, failed = threading.Event(), threading.Event()
+    requests = []
+    original = service._settle
+    def settle(*args):
+        failed.set()
+        if failure == "io":
+            raise OSError("비밀값")
+        return original(*args)
+    def post(*args, **kwargs):
+        assert release.wait(5)
+        return {"usageMetadata": {"costUsd": .12}}
+    monkeypatch.setattr(F.G, "_post", post)
+    def timeout(*args, **kwargs):
+        try:
+            T._tracked_ask("분류" if kind == "classification" else "판정", "test", {}, .01)
+        except T._RequestTimeout as exc:
+            requests.append(exc)
+            raise
+    day = service._day()
+    try:
+        if kind == "classification":
+            service.llm = timeout
+            with pytest.raises(T._RequestTimeout):
+                service.estimate("blind", rows())
+        else:
+            service.verify = timeout
+            run(service, quoted)
+        ledger = T._read(service.cache / "_fc_budget.json")
+        if failure == "corrupt":
+            (service.cache / "_fc_budget.json").write_text("{broken", encoding="utf-8")
+        monkeypatch.setattr(service, "_settle", settle)
+        now[0] += 86400
+        release.set()
+        for request in requests:
+            request.thread.join(5)
+        assert failed.wait(5)
+        for _ in range(2):
+            state = service.status()
+            assert state["error"] == T.LEDGER_NOTE
+            assert "비밀값" not in json.dumps(state, ensure_ascii=False)
+            extra = service.annotate("dcbest", rows())
+            assert extra["fc_ready"] is False and extra["fc_note"] == T.LEDGER_NOTE
+        with pytest.raises(T.Conflict):
+            T._FileLock(service.cache / "_fc_run.lock", blocking=False)
+        for action in (lambda: service.start(quoted["run_id"]), lambda: service.estimate("dcbest", rows())):
+            with pytest.raises(T.Conflict, match="장부"):
+                action()
+        F.atomic_json(service.cache / "_fc_budget.json", ledger)
+        monkeypatch.setattr(service, "_settle", original)
+        assert service.status()["error"] is None
+        assert service.status()["cost_usd"] == (0 if kind == "classification" else .12)
+        assert service.annotate("dcbest", rows())["fc_ready"] is True
+        assert service._pending is None
+        assert T._read(service.cache / "_fc_budget.json")[day] == pytest.approx(.13)
+        assert service._budget()[1] == 0
+        with T._FileLock(service.cache / "_fc_run.lock", blocking=False):
+            pass
+    finally:
+        release.set()
+        for request in requests:
+            request.thread.join(5)
+
+
+def test_normal_classification_settlement_failure_retries(env, monkeypatch):
+    service, _ = env
+    service.llm = lambda *a: {"cost_usd": .1}
+    original = service._settle
+    def fail(*args):
+        raise OSError("비밀값")
+    monkeypatch.setattr(service, "_settle", fail)
+    with pytest.raises(T.Conflict, match="장부"):
+        service.estimate("dcbest", rows())
+    assert service._budget()[1] == pytest.approx(.01)
+    assert service.status()["error"] == T.LEDGER_NOTE
+    with pytest.raises(T.Conflict):
+        T._FileLock(service.cache / "_fc_run.lock", blocking=False)
+    monkeypatch.setattr(service, "_settle", original)
+    assert service.status()["error"] is None
+    assert service._budget()[1] == pytest.approx(.1)
+    assert service.status()["cost_usd"] == 0

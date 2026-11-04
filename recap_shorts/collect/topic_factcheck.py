@@ -26,12 +26,14 @@ SNAPSHOT_TTL = 600
 VERDICT_TTL = 86400
 RUN_LIMIT = 2.0
 DEFAULT_COST = 0.08
+DEFAULT_CLASSIFY_COST = 0.01
 KST = timezone(timedelta(hours=9))
 KINDS = {"news", "general", "uncertain"}
 STATUSES = {"true", "partly", "false", "unverified", "failed"}
 STALE = "목록이 바뀌어 다시 눌러 주세요"
 TIMEOUT_NOTE = "앞선 확인이 아직 끝나지 않았습니다. 잠시 뒤 다시 눌러 주세요."
 BUSY_NOTE = "다른 창에서 확인 중입니다"
+LEDGER_NOTE = "비용 장부를 처리하지 못했습니다. 보관 파일을 확인해 주세요"
 
 
 class Conflict(ValueError):
@@ -109,7 +111,9 @@ def _tracked_ask(stage, model, body, timeout, *, strict_json=False):
         if not isinstance(out, dict):
             raise ValueError("JSON object required")
     except Exception:
-        raise F.FactcheckError(f"사실 확인 {stage} 답을 읽지 못했습니다. 다시 확인해 주세요.") from None
+        exc = F.FactcheckError(f"사실 확인 {stage} 답을 읽지 못했습니다. 다시 확인해 주세요.")
+        exc.response = response  # 파싱에 실패해도 공급자가 보고한 비용은 정산한다.
+        raise exc from None
     return out, response
 
 
@@ -219,12 +223,14 @@ def live_llm(prompt: str, model: str):
     if os.environ.get("PYTEST_CURRENT_TEST"):
         raise RuntimeError("시험 중 실제 분류 호출은 금지합니다")
     try:
-        answer, _ = _tracked_ask("소재 분류", model, F._body(prompt), timeout=30, strict_json=True)
+        answer, response = _tracked_ask("소재 분류", model, F._body(prompt), timeout=30, strict_json=True)
     except F.FactcheckError as exc:
         if "답을 읽지 못했습니다" in str(exc):
-            return {}  # 잘린 JSON도 전체 uncertain으로 남긴다.
-        raise
-    return answer
+            answer, response = {}, getattr(exc, "response", None)
+        else:
+            raise
+    # 모델이 본문에 쓴 비용은 신뢰하지 않고 공급자 메타데이터만 사용한다.
+    return {**answer, "cost_usd": _response_cost(response)}
 
 
 def live_verify(claims, *, title="", source_text=""):
@@ -370,32 +376,37 @@ class TopicFactcheck:
     def _refresh_pending(self):
         # 호출자는 self.lock을 잡는다. 비용 정산 성공 전에는 lease를 놓지 않는다.
         pending = self._pending
-        if not pending or pending["request"].thread.is_alive():
+        if not pending or (pending["request"] and pending["request"].thread.is_alive()):
             return
-        actual = _response_cost(pending["request"].result.get("response"))
-        if pending["day"] is not None and actual is not None:
-            self._settle(pending["day"], pending["expected"], actual)
-            if pending["count_run"]:
-                self._state["cost_usd"] = round(self._state["cost_usd"] + actual - pending["expected"], 8)
+        actual = (_response_cost(pending["request"].result.get("response"))
+                  if pending["request"] else pending["actual"])
+        try:
+            if pending["day"] is not None and actual is not None:
+                self._settle(pending["day"], pending["expected"], actual)
+                if pending["count_run"]:
+                    self._state["cost_usd"] = round(self._state["cost_usd"] + actual - pending["expected"], 8)
+        except Exception:
+            # 조회는 저장된 오류를 돌려주고, 새 호출은 pending/lease로 계속 막는다.
+            self._state["error"] = LEDGER_NOTE
+            return
         pending["lease"].close()
         self._pending = None
         self.request_timed_out = False
-        if self._state["error"] == TIMEOUT_NOTE:
+        if self._state["error"] in (TIMEOUT_NOTE, LEDGER_NOTE):
             self._state["error"] = None
 
-    def _hold_pending(self, request, lease, *, day=None, expected=0, count_run=True):
-        self._pending = {"request": request, "lease": lease, "day": day, "expected": expected, "count_run": count_run}
+    def _hold_pending(self, request, lease, *, day=None, expected=0, count_run=True, actual=None):
+        self._pending = {"request": request, "lease": lease, "day": day, "expected": expected,
+                         "count_run": count_run, "actual": actual}
         self.request_timed_out = True
-        self._state["error"] = TIMEOUT_NOTE
+        self._state["error"] = TIMEOUT_NOTE if request else LEDGER_NOTE
+        if request is None:
+            return  # 정상 응답의 정산 장애도 다음 조회/실행에서 재시도한다.
 
         def watch():
             request.thread.join()
             with self.lock:
-                try:
-                    self._refresh_pending()
-                except Exception:
-                    # 장부 장애 때 lease를 유지한다. 다음 status/start에서 다시 정산한다.
-                    self._state["error"] = "비용 장부를 처리하지 못했습니다. 보관 파일을 확인해 주세요"
+                self._refresh_pending()
         try:
             threading.Thread(target=watch, name="topic-factcheck-recovery", daemon=True).start()
         except RuntimeError:
@@ -409,6 +420,10 @@ class TopicFactcheck:
     def _daily_limit(self) -> float:
         value = _money(_read(self.config_path).get("daily_limit_usd"))
         return 5.0 if value is None else value
+
+    def _classification_cost(self) -> float:
+        value = _money(_read(self.config_path).get("classification_batch_usd"))
+        return value if value is not None and value > 0 else DEFAULT_CLASSIFY_COST
 
     def annotate(self, source: str, items: list[dict]) -> dict:
         """보관 파일만 읽는다. 목록 방문은 분류·판정·비용 장부를 만들지 않는다."""
@@ -426,7 +441,7 @@ class TopicFactcheck:
         with self.lock:
             self._refresh_pending()
             ready = bool(self.ready()) and not self.request_timed_out
-            note = TIMEOUT_NOTE if self.request_timed_out else ("" if ready else F.NO_OR_KEY)
+            note = self._state["error"] if self.request_timed_out else ("" if ready else F.NO_OR_KEY)
         return {"fc_counts": counts, "fc_ready": ready, "fc_note": note}
 
     def estimate(self, source: str, items: list[dict], *, force: bool = False) -> dict:
@@ -438,25 +453,48 @@ class TopicFactcheck:
             with self.lock:
                 self._refresh_pending()
                 if self.request_timed_out:
-                    raise Conflict(TIMEOUT_NOTE)
+                    raise Conflict(self._state["error"])
+            classification_usd = 0.0
             missing = [i for i in items if not read_record(self.cache, source, i["no"], i["title"])]
             if missing:
                 lease = _FileLock(self.cache / "_fc_run.lock", blocking=False)
-                day = self._day()
+
+                def budgeted_llm(prompt, model):
+                    nonlocal classification_usd
+                    expected = self._classification_cost()
+                    day = self._reserve(expected)
+                    if day is None:
+                        raise Conflict("소재 사실 확인의 하루 비용 상한에 도달했습니다")
+                    try:
+                        answer = self.llm(prompt, model)
+                    except _RequestTimeout as exc:
+                        with self.lock:
+                            self._hold_pending(exc, lease, day=day, expected=expected, count_run=False)
+                        raise
+                    actual = _money(answer.get("cost_usd")) if isinstance(answer, dict) else None
+                    if actual is not None:
+                        try:
+                            self._settle(day, expected, actual)
+                        except Exception:
+                            with self.lock:
+                                self._hold_pending(None, lease, day=day, expected=expected,
+                                                   count_run=False, actual=actual)
+                            raise Conflict(LEDGER_NOTE) from None
+                    classification_usd += expected if actual is None else actual
+                    return answer
+
                 try:
                     # 다른 프로세스가 방금 분류/판정을 저장했을 수도 있다.
                     missing = [i for i in missing if not read_record(self.cache, source, i["no"], i["title"])]
-                    kinds = classify_batch([i["title"] for i in missing], self.llm)
-                    with self.lock:
-                        for item, kind in zip(missing, kinds):
-                            if not read_record(self.cache, source, item["no"], item["title"]):
-                                self._save(_path(self.cache, source, item["no"]), {
-                                    "v": TOPIC_FC_VERSION, "title_hash": title_hash(item["title"]),
-                                    "kind": kind, "status": None})
-                except _RequestTimeout as exc:
-                    with self.lock:
-                        self._hold_pending(exc, lease, day=day, count_run=False)
-                    raise
+                    for start in range(0, len(missing), BATCH):
+                        chunk = missing[start:start + BATCH]
+                        kinds = classify_batch([i["title"] for i in chunk], budgeted_llm)
+                        with self.lock:
+                            for item, kind in zip(chunk, kinds):
+                                if not read_record(self.cache, source, item["no"], item["title"]):
+                                    self._save(_path(self.cache, source, item["no"]), {
+                                        "v": TOPIC_FC_VERSION, "title_hash": title_hash(item["title"]),
+                                        "kind": kind, "status": None})
                 finally:
                     self._release_unless_pending(lease)
             with self.lock:
@@ -481,6 +519,7 @@ class TopicFactcheck:
                 todo = candidates[:BATCH]
                 self.snapshots[run_id] = {"source": source, "items": todo, "created": now, "per_item_usd": cost, "force": force}
                 return {"run_id": run_id, "news": news, "todo": len(todo), "done": done,
+                        "classification_usd": round(classification_usd, 8),
                         "est_usd": round(len(todo) * cost, 6), "per_item_usd": cost, "capped": len(candidates) > BATCH,
                         # 다음 묶음은 status.done개만큼 이 순서에서 제외한 nos로 견적한다.
                         "selected_nos": [i["no"] for i in todo]}
@@ -494,7 +533,7 @@ class TopicFactcheck:
         with self.lock:
             self._refresh_pending()
             if self.request_timed_out:
-                raise Conflict(TIMEOUT_NOTE)
+                raise Conflict(self._state["error"])
             if self._state["state"] in ("running", "cancelling"):
                 raise Conflict("이미 사실 확인 중입니다")
             snapshot = self.snapshots.get(run_id) if isinstance(run_id, str) else None

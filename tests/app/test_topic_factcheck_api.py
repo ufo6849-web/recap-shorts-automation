@@ -8,7 +8,7 @@ from starlette.requests import Request
 
 from recap_shorts import factcheck as F
 from recap_shorts.app import create_app
-from recap_shorts.collect import blind, dcbest
+from recap_shorts.collect import blind, dcbest, topic_factcheck as T
 from tests.pipeline.fakes import FakeDeps
 
 PREFIX = "/api/topics/factcheck"
@@ -171,6 +171,7 @@ def test_http_roundtrip(app_env):
     with TestClient(app, client=("127.0.0.1", 50000), base_url="http://localhost") as client:
         assert client.get("/api/topics", params={"source": "dcbest"}).status_code == 200
         quoted = client.post(PREFIX + "/estimate", json={"source": "dcbest", "nos": [1]}).json()
+        assert quoted["classification_usd"] == .01
         response = client.post(PREFIX + "/run", json={"run_id": quoted["run_id"]})
         assert response.status_code == 200
         service.thread.join(5)
@@ -215,3 +216,64 @@ def test_http_remote_peer_cannot_spoof_localhost(app_env, method, path):
     with TestClient(app, base_url="http://localhost", client=("203.0.113.5", 50000)) as client:
         response = client.request(method, path, headers={"Host": "localhost", "X-Forwarded-For": "127.0.0.1"}, json={})
         assert response.status_code == 403
+
+
+@pytest.mark.parametrize("spent", [4.995, 5.0])
+def test_http_classification_budget_exhausted_returns_409_without_llm(app_env, spent):
+    app, service, calls = app_env
+    with TestClient(app, client=("127.0.0.1", 50000), base_url="http://localhost") as client:
+        assert client.get("/api/topics", params={"source": "dcbest"}).status_code == 200
+        F.atomic_json(service.cache / "_fc_budget.json", {service._day(): spent})
+        response = client.post(PREFIX + "/estimate", json={"source": "dcbest", "nos": [1]})
+        assert response.status_code == 409 and "하루" in response.json()["detail"]
+        assert calls == [] and service._budget()[1] == spent
+
+
+def test_http_late_settlement_error_status_and_recovery(app_env, monkeypatch):
+    app, service, _ = app_env
+    release = threading.Event()
+    result = {}
+    def request():
+        if release.wait(10):
+            result["response"] = {"usageMetadata": {"costUsd": .1}}
+    thread = threading.Thread(target=request)
+    original = service._settle
+    def fail(*args):
+        raise OSError("비밀값")
+    def timeout(*args):
+        raise T._RequestTimeout(thread, result)
+    thread.start()
+    try:
+        with TestClient(app, client=("127.0.0.1", 50000), base_url="http://localhost") as client:
+            assert client.get("/api/topics", params={"source": "dcbest"}).status_code == 200
+            service.llm = timeout
+            monkeypatch.setattr(service, "_settle", fail)
+            body = {"source": "dcbest", "nos": [1]}
+            assert client.post(PREFIX + "/estimate", json=body).status_code == 502
+            release.set()
+            thread.join(5)
+            assert not thread.is_alive()
+            for _ in range(2):
+                response = client.get(PREFIX + "/status")
+                assert response.status_code == 200
+                assert response.json()["error"] == T.LEDGER_NOTE
+                assert set(response.json()) == {"run_id", "source", "state", "done", "total", "cost_usd", "stop_reason", "error"}
+                assert "비밀값" not in response.text
+            annotated = client.get("/api/topics", params={"source": "dcbest"})
+            assert annotated.status_code == 200 and annotated.json()["fc_ready"] is False
+            assert annotated.json()["fc_note"] == T.LEDGER_NOTE
+            assert client.post(PREFIX + "/estimate", json=body).status_code == 409
+            assert client.post(PREFIX + "/run", json={"run_id": "missing"}).status_code == 409
+            assert client.post(PREFIX + "/cancel").status_code == 200
+            with pytest.raises(T.Conflict):
+                T._FileLock(service.cache / "_fc_run.lock", blocking=False)
+            monkeypatch.setattr(service, "_settle", original)
+            response = client.get(PREFIX + "/status")
+            assert response.status_code == 200 and response.json()["error"] is None
+            assert service._budget()[1] == pytest.approx(.1)
+            assert client.get("/api/topics", params={"source": "dcbest"}).json()["fc_ready"] is True
+            with T._FileLock(service.cache / "_fc_run.lock", blocking=False):
+                pass
+    finally:
+        release.set()
+        thread.join(5)
