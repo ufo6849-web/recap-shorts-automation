@@ -357,7 +357,7 @@ function SfxCard({ sfx, onSaved }: { sfx: SfxSettings; onSaved: (v: Settings) =>
   return (
     <Card className="mt-4 p-5 sm:p-6">
       <h2 className="text-[20px] font-semibold tracking-[-0.01em]">효과음</h2>
-      <p className="mt-1 text-[13px] leading-relaxed text-sub">내 효과음 폴더를 고르면 프로그램이 소리를 하나씩 듣고, 종류별로 골라 따로 꾸러미를 만듭니다. 내 원래 폴더는 바뀌지 않습니다. Gemini 요청을 쓰고(소리 6개에 1번), Gemini 키가 없으면 파일 이름만 보고 정합니다. 폴더를 고르지 않으면 이 프로그램에 같이 들어 있는 기본 효과음을 씁니다.</p>
+      <p className="mt-1 text-[13px] leading-relaxed text-sub">내 효과음 폴더를 고르면 프로그램이 소리를 하나씩 듣고, 종류별로 골라 따로 꾸러미를 만듭니다. 내 원래 폴더는 바뀌지 않습니다. AI 요청을 쓰고(소리 6개에 1번), AI 키가 없으면 파일 이름만 보고 정합니다. 폴더를 고르지 않으면 이 프로그램에 같이 들어 있는 기본 효과음을 씁니다.</p>
       <div className="mt-3">
         {custom
           ? <Status tone="ok">내 폴더 사용 중 — 효과음 {total(sfx.dirs)}개, {kinds(sfx.dirs)}종류</Status>
@@ -481,7 +481,7 @@ function MemeCard({ memes, onSaved }: { memes: MemeSettings; onSaved: (v: Settin
   return (
     <Card className="mt-4 p-5 sm:p-6">
       <h2 className="text-[20px] font-semibold tracking-[-0.01em]">짤</h2>
-      <p className="mt-1 text-[13px] leading-relaxed text-sub">내 짤 폴더를 고르면 프로그램이 그림을 하나씩 보고 어떤 반응인지 적어 둡니다. 영상은 그 뜻을 보고 문장에 맞는 짤을 붙입니다. 혐오 상징·성적인 그림·잔인한 그림은 알아서 빼고, 실제 사람 사진은 표시만 합니다. 저작권은 따지지 않으니 직접 확인하세요. 내 원래 폴더는 바뀌지 않고, Gemini 요청을 씁니다(그림 6장에 1번).</p>
+      <p className="mt-1 text-[13px] leading-relaxed text-sub">내 짤 폴더를 고르면 프로그램이 그림을 하나씩 보고 어떤 반응인지 적어 둡니다. 영상은 그 뜻을 보고 문장에 맞는 짤을 붙입니다. 혐오 상징·성적인 그림·잔인한 그림은 알아서 빼고, 실제 사람 사진은 표시만 합니다. 저작권은 따지지 않으니 직접 확인하세요. 내 원래 폴더는 바뀌지 않고, AI 요청을 씁니다(그림 6장에 1번).</p>
       <div className="mt-3">
         {memes.using === "custom" ? <Status tone="ok">내 짤 사용 중 — {total(memes.dirs)}장</Status>
           : memes.using === "default" ? <Status tone="mute">기본 짤 사용 중 — {total(memes.default)}장</Status>
@@ -515,7 +515,7 @@ function MemeCard({ memes, onSaved }: { memes: MemeSettings; onSaved: (v: Settin
 
       <details className="mt-1 rounded-[10px] border border-line bg-fill p-3 text-[13px]">
         <summary className="cursor-pointer font-medium">폴더 만드는 법</summary>
-        <p className="mt-2 leading-relaxed text-sub">png·jpg·webp·gif 그림이 든 폴더면 됩니다. 파일 이름은 아무거나 괜찮고, 하위 폴더도 읽습니다. 반응 짤이 아닌 그림, 너무 작은 그림, 똑같은 그림은 알아서 뺍니다. Gemini 키가 없으면 파일 이름을 짤의 뜻으로 씁니다. 폴더에 <code className="font-mono">manifest.json</code> 이 이미 있으면 분석 없이 그 목록대로 씁니다.</p>
+        <p className="mt-2 leading-relaxed text-sub">png·jpg·webp·gif 그림이 든 폴더면 됩니다. 파일 이름은 아무거나 괜찮고, 하위 폴더도 읽습니다. 반응 짤이 아닌 그림, 너무 작은 그림, 똑같은 그림은 알아서 뺍니다. AI 키가 없으면 파일 이름을 짤의 뜻으로 씁니다. 폴더에 <code className="font-mono">manifest.json</code> 이 이미 있으면 분석 없이 그 목록대로 씁니다.</p>
         <p className="mt-3 text-[12px] font-medium text-sub">기본 짤</p>
         <div className="mt-1 rounded-[10px] border border-line bg-surface px-3">
           {memes.default.length ? memes.default.map((f) => <SfxFolderRow key={f.path} f={f} meme />) : <p className="py-2.5 text-sub">같이 든 기본 짤이 없습니다.</p>}
@@ -559,12 +559,13 @@ export default function SettingsPage() {
       setCatBusy(false);
     }
   }
-  // 처음 한 번, 그리고 Gemini 키를 넣거나 지우면 다시(이 키로 쓸 수 있는 모델 목록이 바뀐다)
-  const ready = data ? data.ready : null;
+  // 처음 한 번, 그리고 Gemini 키를 넣거나 지우면 다시(이 키로 쓸 수 있는 모델 목록이 바뀐다). OpenRouter 키만 바뀌면 다시 받지 않는다.
+  const geminiKey = data?.keys.find((k) => k.name === "gemini_api_key");
+  const geminiKeyState = geminiKey ? `${geminiKey.set}/${geminiKey.source ?? ""}` : null;
   useEffect(() => {
-    if (ready !== null) loadCatalog();
+    if (geminiKeyState !== null) loadCatalog();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready]);
+  }, [geminiKeyState]);
 
   /** '쓸 모델' 저장 — 고르면 바로. */
   async function saveUse(p: SettingsPatch) {
@@ -585,7 +586,7 @@ export default function SettingsPage() {
 
   const applyModels = (v: ModelsView) => setData((d) => (d ? { ...d, models: v.models, setup_cmd: v.setup_cmd } : d));
 
-  // 받는 중인 모델이 있으면 1초마다 진행 상황을 다시 읽는다. 다 끝나면 TopBar 상태 점(받아쓰기 모델)도 다시 본다.
+  // 받는 중인 모델이 있으면 1초마다 진행 상황을 다시 읽는다. 다 끝나면 설정 전체를 다시 읽어 준비 상태(ready·ready_reason)와 TopBar 상태 점도 맞춘다.
   const modelsBusy = !!data?.models.some(modelBusy);
   useEffect(() => {
     if (!modelsBusy) return;
@@ -593,7 +594,7 @@ export default function SettingsPage() {
       try {
         const v = await api.models();
         applyModels(v);
-        if (!v.models.some(modelBusy)) window.dispatchEvent(new Event("recap:health"));
+        if (!v.models.some(modelBusy)) apply(await api.settings());     // 설치가 끝났다 — 로컬 목소리 준비 여부가 바뀔 수 있다
       } catch { /* 다음 주기에 다시 */ }
     }, 1000);
     return () => window.clearInterval(t);
@@ -697,9 +698,9 @@ export default function SettingsPage() {
       <h1 className="text-[34px] font-semibold leading-[1.2] tracking-[-0.02em]">설정</h1>
       <p className="mt-2 text-[15px] text-sub">키는 이 컴퓨터의 <code className="break-all font-mono text-[13px]">{data.file}</code> 에만 저장됩니다. 화면에는 끝 네 글자만 보입니다.</p>
 
-      {showReady && gstate.gemini?.test?.ok && (      /* 연결 확인까지 통과했을 때만 — 틀린 키로 "만들 수 있습니다"라고 하지 않게 */
+      {showReady && (gstate.gemini?.test?.ok || gstate.openrouter?.test?.ok) && (      /* 연결 확인까지 통과했을 때만 — 틀린 키로 "만들 수 있습니다"라고 하지 않게 */
         <Card role="status" className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 p-4">
-          <Status tone="ok">Gemini 키를 저장했습니다. 이제 영상을 만들 수 있습니다.</Status>
+          <Status tone="ok">AI 키를 저장했습니다. 이제 영상을 만들 수 있습니다.</Status>
           <Button variant="primary" size="sm" className="ml-auto" onClick={() => go("/")}>영상 만들러 가기</Button>
         </Card>
       )}
@@ -713,7 +714,7 @@ export default function SettingsPage() {
           <Card key={g.id} className="mt-4 p-5 sm:p-6">
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-[20px] font-semibold tracking-[-0.01em]">{g.title}</h2>
-              <Chip tone={req ? "accent" : "outline"}>{req ? "필수" : "선택"}</Chip>
+              <Chip tone={req || g.need ? "accent" : "outline"}>{g.need ?? (req ? "필수" : "선택")}</Chip>
             </div>
             <p className="mt-1 text-[13px] leading-relaxed text-sub">{g.desc}</p>
             <a href={g.url} target="_blank" rel="noopener noreferrer" aria-label={`${g.title} 키 받는 곳 (새 창)`}
@@ -751,7 +752,7 @@ export default function SettingsPage() {
           {rScript && (
             <div>
               <label htmlFor="model-script" className="text-[13px] font-medium">대본</label>
-              <p className="mb-1.5 text-[13px] text-sub">대본 초안을 쓰고 다듬는 Gemini 모델</p>
+              <p className="mb-1.5 text-[13px] text-sub">대본 초안을 쓰고 다듬는 모델(Gemini 또는 OpenRouter)</p>
               <ModelSelect r={rScript} choices={cat?.roles.script} busy={useBusy} onPick={(id) => saveUse({ models: { script: id } })} />
             </div>
           )}

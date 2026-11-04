@@ -1403,7 +1403,10 @@ def make_description(job: Job) -> str:
         notes[0] = "내용은 위 커뮤니티 게시글 기준이며, 팬이 만든 자료(확인되지 않음)가 포함돼 있습니다."
     if ai_used:
         notes.append("일부 장면은 AI로 생성한 이미지입니다(실제 인물·현장 사진이 아님).")
-    notes.append("내레이션은 AI 음성입니다(Google Gemini TTS).")
+    voice = json.loads((job.dir / "voice" / "timings.json").read_text(encoding="utf-8")).get("engine")
+    credit = {"gemini": "Google Gemini TTS", "supertonic": "Supertonic, 이 컴퓨터에서 만듦",
+              "qwen": "Qwen3-TTS, 이 컴퓨터에서 만듦"}.get(voice)
+    notes.append(f"내레이션은 AI 음성입니다({credit})." if credit else "내레이션은 AI 음성입니다.")
     lines += ["", "[알림]"] + [f"- {n}" for n in notes]
     return "\n".join(lines) + "\n"
 

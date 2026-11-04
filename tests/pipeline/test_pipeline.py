@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from recap_shorts import pipeline as P
+from recap_shorts import settings
 from tests.pipeline.fakes import DRAFT, FakeDeps, FakeLLM
 
 SRC = {"gallery": "baseball_new13", "no": 2101, "url": "https://gall.dcinside.com/board/view/?id=baseball_new13&no=2101",
@@ -28,6 +29,7 @@ def statuses(job):
 
 
 def test_full_flow_waits_at_confirm_steps(tmp_path):
+    settings.save({"gemini_api_key": "test-gemini-key-0000000000"})      # 기본 목소리·그림이 Gemini 인 상태(키 없으면 로컬)
     deps = FakeDeps()
     store, runner, job = make(tmp_path, deps)
     go(runner, job)

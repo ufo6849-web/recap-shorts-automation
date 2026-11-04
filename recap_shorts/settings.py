@@ -20,7 +20,9 @@ DEFAULT_FILE = REPO_ROOT / "config" / "settings.local.json"
 # 화면에 나오는 순서 그대로(계약서 2절)
 KEYS = [
     {"name": "gemini_api_key", "env": "RECAP_GEMINI_API_KEY", "label": "Gemini API 키", "group": "gemini",
-     "required": True},
+     "required": False},
+    {"name": "openrouter_api_key", "env": "RECAP_OPENROUTER_API_KEY", "label": "OpenRouter API 키",
+     "group": "openrouter", "required": False},
     {"name": "cf_account_id", "env": "RECAP_CF_ACCOUNT_ID", "label": "Cloudflare 계정 ID", "group": "cloudflare",
      "required": False},
     {"name": "cf_api_token", "env": "RECAP_CF_API_TOKEN", "label": "Cloudflare API 토큰", "group": "cloudflare",
@@ -29,8 +31,11 @@ KEYS = [
 
 GROUPS = [
     {"id": "gemini", "title": "Gemini",
-     "desc": "대본, 목소리, 첨부 그림 읽기, AI 그림(그림 만드는 곳이 Gemini 일 때). 이 키 하나만 있으면 영상을 만들 수 있습니다.",
-     "url": "https://aistudio.google.com/apikey"},
+     "desc": "대본·그림 읽기·목소리·AI 그림. 이 키 하나로 전부 됩니다",
+     "url": "https://aistudio.google.com/apikey", "need": "둘 중 하나 필수"},
+    {"id": "openrouter", "title": "OpenRouter",
+     "desc": "대본(Claude 등)·그림 읽기. Gemini 키가 없으면 Gemini 모델도 이 키로 부릅니다. 목소리는 로컬 엔진을 쓰세요",
+     "url": "https://openrouter.ai/settings/keys", "need": "둘 중 하나 필수"},
     {"id": "cloudflare", "title": "Cloudflare (Clef)",
      "desc": "실시간 베스트 주제 분류, AI 그림 글자 점검, 완성 영상 점검. 없으면 이 점검만 건너뜁니다.",
      "url": "https://dash.cloudflare.com/profile/api-tokens"},
@@ -42,8 +47,7 @@ IMAGE_ENGINES = [
     {"id": "off", "label": "AI 그림 안 만듦 — 글 캡처·사진만"},
 ]
 ENGINE_IDS = [e["id"] for e in IMAGE_ENGINES]
-# 고른 적이 없거나 모르는 값(예전의 "auto" 포함)이면 이것. 로컬 이미지 서버는 저장소에 없어서 Gemini 키만 있어도 그림이 나오게.
-DEFAULT_ENGINE = "gemini"
+# 고른 적이 없거나 모르는 값(예전의 "auto" 포함)이면 기본: Gemini 키가 있으면 gemini, 없으면 off(image_engine 참고).
 
 # 쓸 모델(설정 화면 '쓸 모델'). 기본값은 각 모듈의 기본과 같다(llm/gemini_api.TEXT_MODEL, voice/gemini.DEFAULT_MODEL,
 # images/gemini_image — tests/test_settings.py 가 맞는지 본다). 환경변수가 있으면 그게 먼저이고 화면에서 못 바꾼다.
@@ -54,6 +58,7 @@ MODEL_ROLES = [
 ]
 ROLE_IDS = [r["role"] for r in MODEL_ROLES]
 MODEL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9.\-]{1,79}$")
+VENDOR_MODEL_RE = re.compile(r"^[a-z0-9][a-z0-9.\-]*/[a-z0-9][a-z0-9.\-:]*$")     # OpenRouter 꼴(대본만, 100자 이하)
 VOICE_ENGINES = [
     {"id": "gemini", "label": "Gemini 목소리"},
     {"id": "supertonic", "label": "로컬 목소리 (Supertonic) — 이 컴퓨터에서 만듦, 무료"},
@@ -153,9 +158,11 @@ def key_source(name: str) -> str | None:
 
 
 def image_engine() -> str:
-    """설정 파일의 값(없거나 모르는 값이면 DEFAULT_ENGINE)."""
+    """설정 파일의 값. 없거나 모르는 값이면 Gemini 키가 있을 때 gemini, 없을 때 off(키 없이 그림 엔진이 돌지 않게)."""
     v = _load()["image_engine"]
-    return v if v in ENGINE_IDS else DEFAULT_ENGINE
+    if v in ENGINE_IDS:
+        return v
+    return "gemini" if get_key("gemini_api_key") else "off"
 
 
 def _role(role: str) -> dict:
@@ -171,7 +178,8 @@ def _model_env(role: str) -> str:
 
 def _model_file(role: str) -> str:
     v = _load()["models"].get(role)
-    return v.strip() if isinstance(v, str) and MODEL_ID_RE.match(v.strip()) else ""
+    v = v.strip() if isinstance(v, str) else ""
+    return v if valid_model_id(role, v) else ""
 
 
 def model(role: str) -> str:
@@ -187,9 +195,11 @@ def model_source(role: str) -> str | None:
 
 
 def voice_engine() -> str:
-    """목소리 엔진: gemini | supertonic (설정 파일, 없거나 모르는 값이면 gemini)."""
+    """목소리 엔진: gemini | supertonic. 설정 파일의 값, 없거나 모르는 값이면 Gemini 키가 있을 때 gemini, 없을 때 supertonic."""
     v = _load()["voice"].get("engine")
-    return v if v in VOICE_ENGINE_IDS else "gemini"
+    if v in VOICE_ENGINE_IDS:
+        return v
+    return "gemini" if get_key("gemini_api_key") else "supertonic"
 
 
 def gemini_voice() -> str:
@@ -383,6 +393,15 @@ def sfx_view() -> dict:
             "known_types": S.KNOWN_TYPES, "max_dirs": SFX_MAX_DIRS}
 
 
+def valid_model_id(role: str, v) -> bool:
+    """모델 이름 꼴. 앞뒤 공백은 부르는 쪽이 뺀다. script 만 vendor/name(OpenRouter 의 Claude 등)을 받는다."""
+    if not isinstance(v, str):
+        return False
+    if role == "script" and len(v) <= 100 and VENDOR_MODEL_RE.match(v):
+        return True
+    return bool(MODEL_ID_RE.match(v))
+
+
 def _check_models(models: dict | None) -> None:
     if models is None:
         return
@@ -393,7 +412,7 @@ def _check_models(models: dict | None) -> None:
             raise SettingsError(f"모르는 모델 자리입니다: {role}")
         if v in (None, ""):
             continue
-        if not isinstance(v, str) or not MODEL_ID_RE.match(v.strip()):
+        if not isinstance(v, str) or not valid_model_id(role, v.strip()):
             raise SettingsError("모델 이름에 쓸 수 없는 글자가 있습니다")
         if _model_env(role):
             raise SettingsError(f"환경변수 {_role(role)['env']} 로 정해져 있어 여기서 바꿀 수 없습니다", status=409)
@@ -527,18 +546,58 @@ def _display_path(p: Path) -> str:
         return p.name
 
 
+def llm_ready() -> bool:
+    """글을 쓰는 모델(대본·주제 분류)을 부를 키가 있는가: Gemini 나 OpenRouter 중 하나면 된다."""
+    return bool(get_key("gemini_api_key") or get_key("openrouter_api_key"))
+
+
+def readiness(script_model: str | None = None, tts_engine: str | None = None, need=None) -> dict:
+    """영상 만들기 준비 상태: 대본 모델과 그림 읽기가 갈 곳이 있고, 목소리가 준비돼 있는가.
+    script_model·tts_engine 을 주면 작업 옵션 값으로 보고, 없으면 설정 값으로 본다.
+    need 는 확인할 조건("script"·"read"·"voice")의 모음이다(None 이면 셋 다). 이미 끝난 단계의 조건은 넣지 않는다.
+    reason 은 처음 걸린 조건의 한국어 문장, via 는 화면 표시용(gemini | openrouter | mixed | None)."""
+    from recap_shorts import modelfiles
+    from recap_shorts.llm import gemini_api as G
+    need = {"script", "read", "voice"} if need is None else set(need)
+    no_key = "Gemini 또는 OpenRouter API 키가 필요합니다"
+    has_g, has_o = bool(get_key("gemini_api_key")), bool(get_key("openrouter_api_key"))
+    reason, via = None, set()
+    if "script" in need:
+        script = script_model or model("script")
+        try:
+            via.add(G.route(script, has_g, has_o)[0])
+        except G.GeminiApiError:
+            reason = f"대본 모델({script})은 OpenRouter 키가 필요합니다" if "/" in script else no_key
+    if "read" in need:
+        try:
+            via.add(G.route(G.VISION_MODEL, has_g, has_o)[0])
+        except G.GeminiApiError:
+            reason = reason or no_key
+    voice = tts_engine or voice_engine()
+    if "voice" in need:
+        if voice == "gemini" and has_g:
+            via.add("gemini")
+        if reason is None and voice == "gemini" and not has_g:
+            reason = "목소리가 Gemini 인데 Gemini 키가 없습니다 — 설정에서 로컬 목소리를 고르세요"
+        if reason is None and voice == "supertonic" and not modelfiles.ok("supertonic"):   # 대본 비용을 쓴 뒤 목소리에서 멈추지 않게
+            reason = "로컬 목소리(Supertonic) 모델이 없습니다 — 설정 → 모델 파일에서 먼저 받으세요"
+    shown = None if not via else ("mixed" if len(via) > 1 else next(iter(via)))
+    return {"ok": reason is None, "reason": reason, "via": shown}
+
+
 def public_view() -> dict:
     """GET /api/settings 응답 꼴. 키 값은 들어가지 않는다."""
     from recap_shorts import modelfiles
     from recap_shorts.images import provider
 
+    rd = readiness()
     keys = []
     for k in KEYS:
         v = get_key(k["name"])
         keys.append({"name": k["name"], "label": k["label"], "group": k["group"], "required": k["required"],
                      "env": k["env"], "set": bool(v), "source": key_source(k["name"]), "masked": _masked(v)})
     return {"file": _display_path(path()),
-            "ready": bool(get_key("gemini_api_key")),
+            "ready": rd["ok"], "ready_reason": rd["reason"],
             "keys": keys,
             "groups": GROUPS,
             "image_engine": image_engine(),

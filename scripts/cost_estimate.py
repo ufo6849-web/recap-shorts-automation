@@ -43,6 +43,9 @@ def per_video(rows: list[dict], prices: dict, after: bool = False) -> dict:
             in_tok = u.get("input_tokens") or u.get("promptTokenCount") or (r.get("chars") or 0) * 1.0
             usd = in_tok / 1e6 * p.get("input_per_m", 0) + out_tok / 1e6 * p.get("audio_out_per_m", 0)
             key = f"Gemini 목소리 ({r.get('model')})"
+        elif k == "openrouter":                      # 응답에 실제로 찍힌 비용(cost)을 그대로 더한다
+            usd = float(r.get("cost") or 0)
+            key = f"OpenRouter ({r.get('model')})"
         elif k == "clef":
             neurons += r.get("neurons") or 0
             out["Clef 판단 (Cloudflare)"]["calls"] += 1
@@ -98,9 +101,9 @@ def main() -> None:
         print(f"\n[{label}]")
         for k, x in r["per_video"].items():
             print(f"  {k}: {x['calls']}회, ${x['usd']:.4f}")
-        print(f"  영상 1편: Gemini ${r['per_video_gemini_usd']:.4f}, Clef {r['per_video_neurons']} 뉴런, AI 이미지 {r['per_video_images']}장")
+        print(f"  영상 1편: Gemini·OpenRouter ${r['per_video_gemini_usd']:.4f}, Clef {r['per_video_neurons']} 뉴런, AI 이미지 {r['per_video_images']}장")
         m = r["month"]
-        print(f"  한 달: Gemini ${m['gemini']}, Clef 사용료 ${m['clef_usage']} + 요금제 ${m['clef_plan']}, "
+        print(f"  한 달: Gemini·OpenRouter ${m['gemini']}, Clef 사용료 ${m['clef_usage']} + 요금제 ${m['clef_plan']}, "
               f"(이미지를 API 로 만들면 +${m['images_api_medium']})")
         print(f"  합계: 이미지 서버(한도형)면 ${r['month_total_subscription_images']}, API 면 ${r['month_total_api_images']}")
 

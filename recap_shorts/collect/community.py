@@ -1,4 +1,4 @@
-"""커뮤니티 글(사용자가 준 주소) 본문을 Markdown으로. Crawl4AI(설치된 Edge) -> 안 되면 trafilatura+Playwright 렌더.
+"""커뮤니티 글(사용자가 준 주소) 본문을 Markdown으로. Crawl4AI(Windows 는 설치된 Edge, 리눅스는 Playwright Chromium) -> 안 되면 trafilatura+Playwright 렌더.
 
 작성자·닉네임으로 보이는 줄은 지우지 않고 그대로 둔다. 결과 파일은 work/ 아래에만 쓴다.
 """
@@ -25,9 +25,9 @@ def _crawl4ai_markdown(url: str, base_dir: Path) -> str:
     from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
 
     async def run():
-        # 기본 UA가 가짜 브라우저 UA라서 정직한 UA로 덮어씀. 새 Chromium 대신 설치된 Edge 사용.
-        bc = BrowserConfig(headless=True, verbose=False, user_agent=USER_AGENT + " browser",
-                           chrome_channel="msedge", channel="msedge")
+        # 기본 UA가 가짜 브라우저 UA라서 정직한 UA로 덮어씀. Windows 에서만 설치된 Edge 를 쓰고, 리눅스는 기본 Chromium 을 쓴다.
+        edge_kw = {"chrome_channel": "msedge", "channel": "msedge"} if os.name == "nt" else {}
+        bc = BrowserConfig(headless=True, verbose=False, user_agent=USER_AGENT + " browser", **edge_kw)
         rc = CrawlerRunConfig(cache_mode=CacheMode.BYPASS, verbose=False)
         async with AsyncWebCrawler(config=bc) as c:
             r = await c.arun(url, config=rc)
