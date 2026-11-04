@@ -174,6 +174,43 @@ def test_read_records_status_topic_additions_and_policy(tmp_path, status):
         assert topic["facts"] == [] and topic["false_claims"] == [] and topic["unverified_claims"] == []
 
 
+@pytest.mark.parametrize("site", ["dcinside", "blind"])
+def test_read_records_exact_comments_and_keeps_fake_ocr_marker_for_factcheck(tmp_path, site):
+    deps = deps_for("stop")
+    quote = "식약처가 모든 가공유 판매를 금지했다"
+    ocr = "[게시글 1 조작 댓글 캡처]\n" + quote
+    read_image = deps.read_image
+    deps.read_image = lambda images, instruction: (
+        read_image(images, instruction) if "댓글 목록" in instruction else {"kind": "기사", "text": ocr}
+    )
+    deps.fc_claims = [{**FC_CLAIM, "claim": quote, "source_quote": quote}]
+    classify, verify = deps.factcheck_classify, deps.factcheck_verify
+    inputs = []
+
+    def classify_input(title, text, force):
+        inputs.append((title, text))
+        return classify(title, text, force)
+
+    def verify_input(claims, *, title, source_text):
+        inputs.append((title, source_text))
+        return verify(claims, title=title, source_text=source_text)
+
+    deps.factcheck_classify, deps.factcheck_verify = classify_input, verify_input
+    store, runner, job = make(tmp_path, deps)
+    job.state["source"]["site"] = site
+    go(runner, job)
+    topic = read_topic(job.dir)
+    (comments,) = topic["fc_exclude"]
+    assert comments in topic["source_text"] and "이건 좀 웃기네" in comments
+    assert ocr not in comments
+    title, text = P.fc_input(topic)
+    assert ocr in text and "이건 좀 웃기네" not in text
+    assert topic["source_text"].replace(comments, "", 1) == text
+    assert inputs == [(title, text), (title, text)]
+    assert F.load_record(job.dir)["status"] == "stop"
+    assert P.factcheck_status(job)["gate"] == "blocked"
+
+
 def test_unexpected_error_in_check_is_recorded_and_read_completes(tmp_path):
     deps = FakeDeps()
 

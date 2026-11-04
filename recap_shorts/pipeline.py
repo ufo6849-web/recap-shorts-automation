@@ -576,6 +576,7 @@ def step_read(c: Ctx) -> None:
     head = (f"[게시글 1] {gname} 게시글, {(post.get('written_at') or '')[:16]} 작성\n"
             f"제목: {clean_text(post.get('title'))}\n본문: {clean_text(post.get('text')).replace(chr(10), ' ')}")
     parts, atts = [head], []
+    fc_exclude = []
     # 키가 없거나 틀려서 못 읽었으면 같은 실패를 그림마다 되풀이하지 않고 첫 실패에서 멈춘다.
     # 그 안내를 단계 오류로 그대로 올려 “글자를 못 읽음”보다 원인이 먼저 보이게 한다.
     key_fail: BaseException | None = None
@@ -614,7 +615,9 @@ def step_read(c: Ctx) -> None:
             lines = [clean_text(re.sub(r"\s*-\s*dc App\s*$", "", str(x))) for x in (r.get("comments") or []) if str(x).strip()]
             lines = [x for x in lines if len(x) >= 4][:30]
             if lines:
-                parts.append(f"\n[게시글 1 {where} 댓글 캡처(닉네임 가림, 욕설·비하 댓글 뺌)]\n" + "\n".join(f"- {x}" for x in lines))
+                comments = f"\n[게시글 1 {where} 댓글 캡처(닉네임 가림, 욕설·비하 댓글 뺌)]\n" + "\n".join(f"- {x}" for x in lines)
+                parts.append(comments)
+                fc_exclude.append(comments)
                 atts.append({"n": len(files) + 1, "file": "post/comments.png", "kind": f"{where} 댓글 캡처", "dc_comments": True,
                              "fan_made": False, "summary": f"이 글에 달린 {where} 댓글", "has_face": False, "has_id_text": True,
                              "text": "\n".join(lines)})
@@ -627,7 +630,7 @@ def step_read(c: Ctx) -> None:
     topic = {"topic": f"{gname} 게시글 「{clean_text(post.get('title'))}」의 내용 중 가장 흥미로운 반전 하나를 잡아 이야기한다. {caution}",
              "source_kind": "community", "source_url": src["url"],
              "tone_end": "웃기면서도 씁쓸한 감탄이나 물음 한 줄",
-             "source_text": "\n".join(parts), "attachments": atts}
+             "source_text": "\n".join(parts), "attachments": atts, "fc_exclude": fc_exclude}
     c.write_json("topic.json", topic)
     c.job.artifact("topic", "topic.json")
     c.progress(0.95, "사실 확인 중 (정보성 글이면 뉴스와 대조)")
@@ -638,15 +641,13 @@ def step_read(c: Ctx) -> None:
 # ------------------------------------------------------------------ 사실 확인(정보성 글)
 def fc_input(topic: dict) -> tuple[str, str]:
     """분류·판정·입력 해시에 쓸 원문 제목과 댓글을 제외한 본문. 대본용 원본은 보존한다."""
-    lines = []
-    comments = False
-    for line in (topic.get("source_text") or "").splitlines(keepends=True):
-        if line.startswith("[게시글"):
-            # step_read가 디시·블라인드에 공통으로 붙이는 댓글 캡처 구간만 제외한다.
-            comments = bool(re.match(r"\[게시글 \d+ [^\r\n]*댓글 캡처", line))
-        if not comments:
-            lines.append(line)
-    text = "".join(lines)
+    text = topic.get("source_text") or ""
+    exclusions = topic.get("fc_exclude")
+    if isinstance(exclusions, list):
+        for block in exclusions:
+            # 기록 없음·수정·중복으로 실제 구간을 특정할 수 없으면 원문을 남긴다.
+            if isinstance(block, str) and block and text.count(block) == 1:
+                text = text.replace(block, "", 1)
     title = re.search(r"^제목:[ \t]*(.*)$", text, re.M)
     return (title.group(1).strip() if title else (topic.get("topic") or "")), text
 
