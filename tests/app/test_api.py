@@ -243,9 +243,18 @@ def test_script_refine_endpoint(env):
 def test_topic_edit_resets_script(env):
     client, app, deps = env
     jid = new_job(client, app, options={"auto_topic": True})
+    job = app.state.store.get(jid)
+    auto_topic = json.loads((job.dir / "topic.json").read_text())["topic_auto"]
     client.put(f"/api/jobs/{jid}/topic", json={"topic": "새 주제"})
+    topic = json.loads((job.dir / "topic.json").read_text())
+    assert topic["topic_auto"] == auto_topic and topic["topic"] == "새 주제"
+    assert P.fc_input(topic)[1].startswith("주제: 새 주제\n")
     st = client.get(f"/api/jobs/{jid}").json()
     assert step(st, "script")["status"] == "todo" and step(st, "read")["status"] == "waiting"
+    # 글이 바뀌어 사실 확인 기록이 낡았다 → 다시 확인하기 전에는 넘어갈 수 없다(설계 11.5)
+    assert client.post(f"/api/jobs/{jid}/continue").status_code == 409
+    P.recheck_factcheck(app.state.runner, app.state.store.get(jid))
+    idle(app)
     client.post(f"/api/jobs/{jid}/continue")
     idle(app)
     assert step(client.get(f"/api/jobs/{jid}").json(), "script")["status"] == "waiting"

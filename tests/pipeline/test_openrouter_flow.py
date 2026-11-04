@@ -10,7 +10,7 @@ from recap_shorts import pipeline as P
 from recap_shorts import settings, usage
 from recap_shorts.collect.http import Blocked
 from recap_shorts.images import sensitive
-from tests.pipeline.fakes import READ_TEXT, FakeLLM, png
+from tests.pipeline.fakes import READ_TEXT, FakeLLM, png, FC_CLAIM, FC_FACT, FC_SOURCE
 
 OR_URL = "https://openrouter.ai/api/v1/chat/completions"
 OR_KEY = "sk-or-test-0000000000000000"
@@ -22,8 +22,8 @@ class Resp:
     status_code = 200
     text = ""
 
-    def __init__(self, content):
-        self._d = {"choices": [{"message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+    def __init__(self, content, annotations=None):
+        self._d = {"choices": [{"message": {"role": "assistant", "content": content, "annotations": annotations or []}, "finish_reason": "stop"}],
                    "usage": {"prompt_tokens": 100, "completion_tokens": 50, "cost": 0.01}}
 
     def json(self):
@@ -45,7 +45,16 @@ class OpenRouter:
             content = {"kind": "비교표", "fan_made": False, "text": READ_TEXT, "summary": "표", "has_face": False,
                        "has_id_text": False}
         else:
-            content = self.llm.complete_json("".join(p.get("text", "") for p in parts if p["type"] == "text"))
+            prompt = "".join(p.get("text", "") for p in parts if p["type"] == "text")
+            if "너는 쇼츠 영상을 만들기 전에" in prompt:
+                content = {"kind": "info", "claims": [FC_CLAIM]}
+            elif "너는 한국어 뉴스 사실 확인 담당" in prompt:
+                content = {"results": [{"id": "C1", "verdict": "true", "fact": FC_FACT,
+                                        "sources": [FC_SOURCE["url"]]}]}
+                return Resp(json.dumps(content, ensure_ascii=False), annotations=[
+                    {"url_citation": {"url": FC_SOURCE["url"], "title": FC_SOURCE["title"]}}])
+            else:
+                content = self.llm.complete_json(prompt)
         return Resp(json.dumps(content, ensure_ascii=False))
 
 
@@ -78,7 +87,8 @@ def test_openrouter_only_read_and_script_use_the_right_models(tmp_path, monkeypa
     assert (job.dir / "script_final" / "script.json").is_file()
     models = [s["model"] for s in or_post.sent]
     assert models[0] == "google/gemini-3.8-flash"                       # 그림 읽기는 Gemini 3.8 Flash
-    assert models[1:] and all(m == "anthropic/claude-opus-5.5" for m in models[1:])   # 초안·다듬기는 Claude Opus 5.5
+    assert models[1] == "google/gemini-3.8-flash"                       # 사실 확인 분류(정보성 판별)도 같은 Flash — 읽기 단계에서 한 번 더
+    assert models[2:] and all(m == "anthropic/claude-opus-5.5" for m in models[2:])   # 초안·다듬기는 Claude Opus 5.5
     assert all(s["url"] == OR_URL and s["auth"] == f"Bearer {OR_KEY}" for s in or_post.sent)
     assert [kind for kind, _ in rows] == ["openrouter"] * len(models)
     assert [f["model"] for _, f in rows] == models                       # 기록에도 같은 모델 이름이 남는다

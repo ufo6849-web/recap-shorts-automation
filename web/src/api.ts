@@ -53,6 +53,10 @@ export const api = {
   jobs: () => req<JobState[]>("GET", "/api/jobs"),
   job: (id: string) => req<JobState>("GET", `/api/jobs/${id}`),
   next: (id: string) => req<unknown>("POST", `/api/jobs/${id}/continue`),
+  /** 사실 확인을 다시 한다(force: 건너뛴 일반 글도 주장을 뽑는다). 대기열을 거치고, 작업이 바쁘면 409. */
+  factcheck: (id: string, force = false) => req<unknown>("POST", `/api/jobs/${id}/factcheck`, { force }),
+  /** 직접 확인했음: 메모(1~500자)를 남기고 막힌 판정을 넘긴다. 판정이 stop·failed 이고 글이 바뀌지 않았을 때만 받는다. */
+  factcheckOverride: (id: string, note: string) => req<unknown>("POST", `/api/jobs/${id}/factcheck/override`, { note }),
   script: (id: string) => req<ScriptDoc>("GET", `/api/jobs/${id}/script`),
   saveScript: (id: string, script: ScriptDoc["script"]) => req<ScriptDoc>("PUT", `/api/jobs/${id}/script`, { script }),
   /** 백그라운드로 돌고 {id,status:"running"} 를 바로 돌려준다 — 끝나면 script 를 다시 읽는다 */

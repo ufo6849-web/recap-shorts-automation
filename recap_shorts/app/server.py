@@ -25,6 +25,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from recap_shorts import archive, errors
+from recap_shorts import factcheck as fc
 from recap_shorts import pipeline as P
 from recap_shorts.collect import made as made_mod
 
@@ -140,9 +141,42 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
                 st["offline"] = not (job.dir / "state.json").is_file()
             except OSError:
                 st["offline"] = True
+        st["factcheck_policy"] = st.get("factcheck_policy")
+        current = P.factcheck_status(job)
+        st["factcheck"] = P.factcheck_view(job, status=current)
+        if not current["legacy"]:
+            rec = current["record"] or {}
+            for step in st["steps"]:
+                if step["key"] != "read":
+                    continue
+                for sub in step.get("sub") or []:
+                    if sub["label"] != "사실 확인":
+                        continue
+                    if st.get("factcheck_running") or (step["status"] == "running" and sub["status"] == "running"):
+                        status, note = "running", "확인 중"
+                    elif current["stale"] or current["missing"]:
+                        status, note = "error", "글이 바뀌어 다시 확인해야 합니다"
+                    elif current["gate"] == "clear" and rec.get("status") in ("stop", "failed"):
+                        status, note = "done", "직접 확인으로 넘김"
+                    elif current["gate"] == "clear" and rec.get("status") == "warn":
+                        status, note = "done", "주의 확인하고 넘김"
+                    else:
+                        status = "error" if current["gate"] == "blocked" else "done"
+                        note = P._FC_NOTE.get(rec.get("status"), current["gate_reason"] or "확인 결과 없음")
+                    sub.update(status=status, note=note)
         if brief:
             st["log"] = st["log"][-5:]
         return st
+
+    def factcheck_gate_or_409(job: P.Job) -> None:
+        """사실 확인이 통과하지 않았으면(막힘·낡음·기록 없음, 주의 확인 전) 다시 하기·렌더·넘기기를 막는다. 기능 이전 작업은 통과."""
+        if job.state.get("factcheck_running"):
+            raise HTTPException(409, "사실 확인 중입니다 — 끝난 뒤에 다시 시도하세요")
+        if job.capcut_busy:
+            raise HTTPException(409, "캡컷 초안을 이미 만드는 중입니다")
+        st = P.factcheck_status(job)
+        if st["gate"] != "clear":
+            raise HTTPException(409, st["gate_reason"])
 
     # ---------------------------------------------------------------- 상태 점검
     # 'gemini_key' 항목은 화면 호환 때문에 이름을 그대로 두고, 뜻은 'AI 키 준비'(설정 readiness)다.
@@ -766,7 +800,7 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
             raise no_key_409(rd["reason"])
         try:
             P.continue_job(runner, job)
-        except P.Busy as e:
+        except (P.Busy, P.FactcheckBlocked) as e:
             raise HTTPException(409, str(e))
         return view(job)
 
@@ -774,20 +808,55 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
     def rerun(jid: str, body: dict = Body(...)):
         """어떤 단계부터 다시(앞 단계 결과는 그대로). 자료 화면을 다시 만들 때 이미 만든 AI 그림은 그대로 쓴다."""
         job = job_or_404(jid)
-        idle_or_409(job)
         key = body.get("from")
         if key not in ("assets", "scenes", "render"):
             raise HTTPException(400, "from 은 assets·scenes·render 중 하나")
-        rd = pipeline_ready(job.options, P.STEP_KEYS[P.STEP_KEYS.index(key):])   # key 부터 끝까지가 다시 돈다
-        if not rd["ok"]:                               # AI 그림·청크 찾기·목소리를 다시 부르는 단계는 준비부터
-            raise no_key_409(rd["reason"])
         with job.lock:
+            idle_or_409(job)
+            factcheck_gate_or_409(job)
+            rd = pipeline_ready(job.options, P.STEP_KEYS[P.STEP_KEYS.index(key):])   # key 부터 끝까지가 다시 돈다
+            if not rd["ok"]:
+                raise no_key_409(rd["reason"])
             if any(job.step(k)["status"] != "done" for k in P.STEP_KEYS[:P.STEP_KEYS.index(key)]):
                 raise HTTPException(409, "앞 단계가 끝나야 다시 할 수 있습니다")
             job.reset_from(key)
             job.log(f"'{dict(P.STEPS)[key]}' 단계부터 다시")
             job.save()
-        runner.submit(job, detail=f"{dict(P.STEPS)[key]}부터 다시")
+            runner.submit(job, detail=f"{dict(P.STEPS)[key]}부터 다시")
+        return view(job)
+
+    @app.post("/api/jobs/{jid}/factcheck", dependencies=[Depends(local_only)])
+    def factcheck_recheck(jid: str, body: dict = Body(default={})):
+        """사실 확인을 다시 한다(force=true 면 일반 글도 주장을 뽑아 확인). 작업 중이거나 읽기가 끝나지 않았으면 409."""
+        job = job_or_404(jid)
+        idle_or_409(job)
+        try:
+            P.recheck_factcheck(runner, job, force=body.get("force") is True)
+        except P.Busy as e:
+            raise HTTPException(409, str(e))
+        return view(job)
+
+    @app.post("/api/jobs/{jid}/factcheck/override", dependencies=[Depends(local_only)])
+    def factcheck_override(jid: str, body: dict = Body(...)):
+        """사실 아님·확인 실패 판정을 사람이 직접 확인했다고 넘긴다(메모 1~500자). 글이 바뀌었으면 안 된다."""
+        job = job_or_404(jid)
+        note = body.get("note")
+        note = note.strip() if isinstance(note, str) else ""
+        if not 1 <= len(note) <= 500:
+            raise HTTPException(400, "메모는 1~500자로 적어 주세요")
+        with job.lock:
+            idle_or_409(job)
+            if job.state.get("factcheck_running"):
+                raise HTTPException(409, "사실 확인 중입니다 — 끝난 뒤에 다시 시도하세요")
+            if job.capcut_busy:
+                raise HTTPException(409, "캡컷 초안을 이미 만드는 중입니다")
+            st = P.factcheck_status(job)
+            rec = st["record"]
+            if rec is None or rec.get("status") not in ("stop", "failed") or st["stale"]:
+                raise HTTPException(400, "사실 아님·확인 실패 판정이고 글이 바뀌지 않았을 때만 직접 확인으로 넘길 수 있습니다")
+            rec["override"] = {"at": P.now(), "note": note, "input_hash": rec["input_hash"]}
+            fc.save_record(job.dir, rec)
+            job.log("사실 확인 판정을 직접 확인으로 넘김")
         return view(job)
 
     @app.post("/api/jobs/{jid}/archive")
@@ -883,6 +952,9 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
             script, check, info = _refine(topic, base, base_check, llm)
             check = dict(check)
             check["refine"] = info
+            rec = fc.load_record(j.dir)
+            if rec and any(x.get("verdict") in ("false", "unverified") for x in rec.get("claims") or []):
+                script, check = P._script_factcheck(P.Ctx(j, "script", deps), script, check, rec)
             save_script(j, script, check, "다시 다듬음 — 확인하세요")
             j.log("대본 다듬기를 다시 함" + ("" if info["applied"] else f" (적용 안 됨: {info['error']})"))
 
@@ -1282,8 +1354,9 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
     @app.post("/api/jobs/{jid}/render")
     def render_job(jid: str):
         job = job_or_404(jid)
-        idle_or_409(job)
         with job.lock:
+            idle_or_409(job)
+            factcheck_gate_or_409(job)
             sc = job.step("scenes")
             if sc["status"] not in ("waiting", "done"):
                 raise HTTPException(409, "장면 배치가 끝난 뒤에 렌더할 수 있습니다")
@@ -1291,11 +1364,10 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
                 sc.update(status="done")
             job.reset_from("render")
             job.save()
-        runner.submit(job, detail="렌더 요청")
+            runner.submit(job, detail="렌더 요청")
         return view(job)
 
     # ---------------------------------------------------------------- CapCut 초안으로 넘기기
-    capcut_busy: set[str] = set()
 
     @app.get("/api/capcut/status")
     def capcut_status():
@@ -1317,13 +1389,13 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
         """영상에 쓴 타임라인을 CapCut 초안 폴더로(그림·글자·소리를 따로 고칠 수 있게). 몇 초 걸리고, 외부 호출은 없다."""
         from recap_shorts.capcut import export as ce
         job = job_or_404(jid)
-        if job.state["status"] == "running":
-            raise HTTPException(409, "지금 작업 중입니다 — 끝난 뒤에 다시 시도하세요")
-        if job.step("scenes")["status"] not in ("done", "waiting"):
-            raise HTTPException(409, "장면 배치까지 끝난 뒤에 캡컷으로 넘길 수 있습니다")
-        if jid in capcut_busy:
-            raise HTTPException(409, "캡컷 초안을 이미 만드는 중입니다")
-        capcut_busy.add(jid)
+        with job.lock:
+            if job.state["status"] == "running":
+                raise HTTPException(409, "지금 작업 중입니다 — 끝난 뒤에 다시 시도하세요")
+            factcheck_gate_or_409(job)
+            if job.step("scenes")["status"] not in ("done", "waiting"):
+                raise HTTPException(409, "장면 배치까지 끝난 뒤에 캡컷으로 넘길 수 있습니다")
+            job.capcut_busy = True
         try:
             r = ce.export_job(job.dir, record=not job.readonly)
         except FileNotFoundError as e:
@@ -1332,7 +1404,8 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
             P.write_error_log(job, "capcut", e)
             raise HTTPException(500, f"캡컷 초안을 만들지 못했습니다: {errors.screen_text(e)}")
         finally:
-            capcut_busy.discard(jid)
+            with job.lock:
+                job.capcut_busy = False
         if not job.readonly:
             job.log(f"캡컷 초안을 만들었습니다: {r['draft_name']}" + ("" if r["registered"] else " (프로젝트 목록에는 안 올림)"))
         return r
@@ -1357,7 +1430,7 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
         for k in ("topic", "source_text", "tone_end"):
             if isinstance(body.get(k), str):
                 cur[k] = body[k]
-        p.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
+        fc.atomic_json(p, cur)
         with job.lock:
             if job.step("script")["status"] != "todo":
                 job.reset_from("script")
