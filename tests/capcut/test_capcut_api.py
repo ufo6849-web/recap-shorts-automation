@@ -19,7 +19,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("RECAP_CAPCUT_DRAFTS_DIR", str(drafts))
     monkeypatch.setattr(desktop, "capcut_running", lambda: False)
     app = create_app(work_root=tmp_path / "work", deps=FakeDeps())
-    with TestClient(app, base_url="http://127.0.0.1:8020") as client:     # 넘기기는 이 PC 에서만(local_only)
+    with TestClient(app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1:8020") as client:     # 넘기기는 이 PC 에서만(local_only)
         yield client, app, drafts
 
 

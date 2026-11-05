@@ -11,6 +11,7 @@ POST /assets/blur(사람이 그린 사각형을 모자이크하고 캡처 카드
 from __future__ import annotations
 
 import json
+import ipaddress
 import os
 import re
 import shutil
@@ -243,7 +244,15 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
 
     # ---------------------------------------------------------------- 설정(키·AI 그림 엔진)
     def local_only(request: Request) -> None:
-        """/api/settings* 는 이 컴퓨터에서만: Host·Origin 머리말의 호스트가 127.0.0.1/localhost/::1 이어야 한다."""
+        """소켓 peer와 Host·Origin이 모두 로컬이어야 한다. 전달 헤더는 믿지 않는다."""
+        try:
+            peer = ipaddress.ip_address(request.client.host) if request.client else None
+            if isinstance(peer, ipaddress.IPv6Address) and peer.ipv4_mapped:
+                peer = peer.ipv4_mapped
+        except ValueError:
+            peer = None
+        if peer is None or not peer.is_loopback:
+            raise HTTPException(403, "이 컴퓨터에서만 설정을 바꿀 수 있습니다")
         allowed = ("127.0.0.1", "localhost", "::1")
 
         def host_only(v: str) -> str:
@@ -488,6 +497,60 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
         return models_view()
 
     # ---------------------------------------------------------------- 주제
+    from recap_shorts.collect import topic_factcheck as topic_fc
+
+    topic_checks = topic_fc.TopicFactcheck(store.root / "_topics")
+    app.state.topic_factcheck = topic_checks  # 시험에서는 llm·verify·ready를 주입한다.
+
+    @app.post("/api/topics/factcheck/estimate", dependencies=[Depends(local_only)])
+    def topics_fc_estimate(body: dict = Body(...)):
+        """{source, nos, force?: bool}. force는 판정만 무시하고 분류는 재사용한다."""
+        source, nos = body.get("source"), body.get("nos")
+        if source not in ("dcbest", "blind") or not isinstance(nos, list) or len(nos) > 200:
+            raise HTTPException(400, "source는 dcbest 또는 blind이며 nos는 200건 이하 목록이어야 합니다")
+        if any(isinstance(no, bool) or not isinstance(no, (str, int)) for no in nos):
+            raise HTTPException(400, "글 번호가 올바르지 않습니다")
+        if "force" in body and not isinstance(body["force"], bool):
+            raise HTTPException(400, "force는 참 또는 거짓이어야 합니다")
+        # 클라이언트 제목은 사용하지 않는다. 여러 목록 캐시 중 가장 최근 제목을 쓴다.
+        with topics_lock:
+            known = {}
+            for key, (at, cached) in sorted(topics_cache.items(), key=lambda pair: pair[1][0]):
+                if key[0] != source or time.time() - at >= TOPICS_TTL or not isinstance(cached, tuple):
+                    continue
+                for item in cached[0]:
+                    known[str(item.no)] = {"no": item.no, "title": item.title}
+            selected = list(dict.fromkeys(str(no) for no in nos))
+            if any(no not in known for no in selected):
+                raise HTTPException(409, topic_fc.STALE)
+            items = [known[no] for no in selected]
+        try:
+            return topic_checks.estimate(source, items, force=body.get("force", False))
+        except topic_fc.Conflict as e:
+            raise HTTPException(409, str(e)) from None
+        except ValueError:
+            raise HTTPException(400, "소재 견적 요청이 올바르지 않습니다") from None
+        except Exception:
+            raise HTTPException(502, "소재 분류를 마치지 못했습니다. 다시 눌러 주세요") from None
+
+    @app.post("/api/topics/factcheck/run", dependencies=[Depends(local_only)])
+    def topics_fc_run(body: dict = Body(...)):
+        try:
+            return topic_checks.start(body.get("run_id"))
+        except topic_fc.Conflict as e:
+            raise HTTPException(409, str(e)) from None
+
+    @app.get("/api/topics/factcheck/status", dependencies=[Depends(local_only)])
+    def topics_fc_status():
+        return topic_checks.status()
+
+    @app.post("/api/topics/factcheck/cancel", dependencies=[Depends(local_only)])
+    def topics_fc_cancel(body: dict | None = Body(None)):
+        try:
+            return topic_checks.cancel((body or {}).get("run_id"))
+        except topic_fc.Conflict as e:
+            raise HTTPException(409, str(e)) from None
+
     def fit_views(items: list[dict], hide_unfit: bool) -> tuple[list[dict], dict]:
         """채널 대주제 맞춤 점수. 글 모델 키(Gemini 나 OpenRouter)가 하나도 없으면 부르지 않고 목록만 원래 순서로 보여 준다
         (점수를 못 매긴 이유에 'RuntimeError' 같은 것을 화면에 내보내지 않게)."""
@@ -549,9 +612,10 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
         items = [dcbest.topic_view(it, tris.get(it.no), cfg) for it in dcbest.sort_items(raw, sort)]
         items, fit_extra = fit_views(items, hide_unfit)
         items, made_extra = mark_made(items, "dcbest", hide_made)
+        fc_extra = topic_checks.annotate("dcbest", items)
         return {"source": "dcbest", "sort": sort, "hours": hours, "pages": pages, "fetched_at": fetched_at,
                 "triage": tri_state, "triage_note": tri_note, "items": items,
-                "hidden_count": sum(1 for i in items if i["hidden"]), **fit_extra, **made_extra}
+                "hidden_count": sum(1 for i in items if i["hidden"]), **fit_extra, **made_extra, **fc_extra}
 
     def blind_topics(sort: str, hours: int, refresh: bool, hide_unfit: bool = False, hide_made: bool = False) -> dict:
         """블라인드 토픽 베스트 목록 — dcbest_topics 와 같은 모양으로 돌려준다(쪽 넘김·더보기가 없어 pages 는 늘 1).
@@ -578,9 +642,10 @@ def create_app(work_root: str | Path | None = None, deps: P.Deps | None = None, 
                       source_check=None, source_check_reason="") for it in blind.sort_items(raw, sort)]   # 분야 라벨(Clef) 없음 — 토픽 이름은 tag 로 보인다
         items, fit_extra = fit_views(items, hide_unfit)
         items, made_extra = mark_made(items, "blind", hide_made, site="blind")
+        fc_extra = topic_checks.annotate("blind", items)
         return {"source": "blind", "sort": sort, "hours": hours, "pages": 1, "fetched_at": fetched_at,
                 "triage": "skipped", "triage_note": "블라인드는 Clef 분류 없이 그대로 보여 줍니다",
-                "items": items, "hidden_count": 0, **fit_extra, **made_extra}
+                "items": items, "hidden_count": 0, **fit_extra, **made_extra, **fc_extra}
 
     # ---------------------------------------------------------------- 채널 대주제
     @app.get("/api/channel")

@@ -23,7 +23,7 @@ def ready(tmp_path):
     for key in P.STEP_KEYS:
         job.update_step(key, status="done")
     job.set_status("done")
-    with TestClient(app, base_url="http://127.0.0.1:8020") as client:
+    with TestClient(app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1:8020") as client:
         yield app, client, job
 
 

@@ -1,13 +1,135 @@
 // ?mock=1 — 백엔드 없이 화면을 볼 수 있게 하는 가짜 응답. 형식은 docs/03_v2_app_design.md 1.2 와 같고,
 // 이미지·소리·영상·대본·타임라인은 목 작업 폴더(아래 MEDIA)의 실제 파일을 /media/<폴더>/... 로 읽는다.
 import { ApiError } from "../apiError";
-import type { AssetEntry, BestResponse, BestTopic, Channel, FactSource, FactcheckView, GeminiModels, Health, ImageEngine, JobState, ModelFile, ModelRole, Scenes, ScriptDoc, Settings, SettingsGroup, SettingsKey, SettingsPatch, SfxFolder, Step, StepKey, StepStatus, SubStep, TopicsResponse, VoiceTimings } from "../types";
+import type { AssetEntry, BestResponse, BestTopic, Channel, FactSource, FactcheckView, GeminiModels, Health, ImageEngine, JobState, ModelFile, ModelRole, Scenes, ScriptDoc, Settings, SettingsGroup, SettingsKey, SettingsPatch, SfxFolder, Step, StepKey, StepStatus, SubStep, TopicsResponse, VoiceTimings, TopicFactcheck, TopicFcEstimate, TopicFcStatus } from "../types";
 import { BEST, BEST_FIT, MADE_JOBS, TOPICS } from "./topics";
 import { mockLibraryFileUrl as libFileUrl, mockLibraryRequest, mockMemeSettings, mockSettle, mockSfxFolderOf, usedDirs } from "./library";
 
 const PRESETS = [{ id: "daily_drama", label: "일상 논란·썰", desc: "" }, { id: "money_life", label: "돈·생활 경제", desc: "" }, { id: "curious_facts", label: "알고 보면 신기한 상식", desc: "" }];
 let channel: { main_topic: string | null; custom: string | null } = { main_topic: "daily_drama", custom: null };
 const channelView = (): Channel => ({ ...channel, label: channel.main_topic === "custom" ? channel.custom : (PRESETS.find((p) => p.id === channel.main_topic)?.label ?? null), source: "local", presets: PRESETS });
+
+// 주제 찾기: ?mock=1&topicfc=ready|empty|checked|capped|unready|stopped|failed|expired-cache|error400|error409|error502
+// topicfc_classification_usd=0.04 로 새 항목 분류 비용 선택, topicfc_kind=news|general|uncertain 로 분류 결과 선택.
+// 기본 ready는 칩 4종 + 일반 + 만료 + 미분류. 유료 호출 없이 실행당 한 글씩 완료된다.
+const topicFcCase = new URLSearchParams(location.search).get("topicfc") ?? "ready";
+const topicFcRecords = new Map<string, TopicFactcheck>();
+const topicFcKey = (source: string, no: string | number) => `${source}:${no}`;
+const topicFcGeneral = (): TopicFactcheck => ({ kind: "general", status: null, chip: null, why: null, sources: [], at: null, expired: false });
+// 긴 인용 예: "발표 내용이었습니다([example.com](https://example.com/topic-factcheck?ref=long-query))."
+// 실제 응답처럼 서버에서 링크·도메인 인용을 제거한 문장을 넣어 한 줄 표시와 펼침을 확인한다.
+const topicFcLongWhy = "[가상] 공공 지원금을 전면 폐지한다는 보도는 찾지 못했습니다. 확인한 보도는 일부 사업의 신청 기간과 지원 조건을 바꾼다는 발표 내용이었습니다. 기존 수급자에 대한 지원은 계속되며, 신규 신청자는 지역별 공고에서 대상과 접수 일정을 확인해야 합니다. 그 밖의 관련 보도도 예산 조정과 신청 절차 안내였으므로 모든 지원이 즉시 중단된다는 제목은 보도 내용과 다릅니다.";
+function topicFcVerdict(i: number): TopicFactcheck {
+  const color = (["bad", "warn", "outline", "ok"] as const)[i % 4];
+  return { kind: "news", status: ({ bad: "false", warn: "partly", outline: "unverified", ok: "true" } as const)[color],
+    chip: { color, label: { bad: "가짜 의심", warn: "주의", outline: "확인 안 됨", ok: "보도 확인" }[color] },
+    why: { bad: topicFcLongWhy, warn: "[가상] 일부만 맞음 — 사건은 보도됐지만 제목 표현이 과장됐습니다.", outline: "[가상] 제목만으로는 사실을 확인할 보도를 찾지 못했습니다.", ok: "[가상] 제목의 핵심 내용이 보도와 일치합니다." }[color],
+    sources: color === "outline" ? [] : [{ url: "https://example.com/topic-factcheck", outlet: "예시 언론사", date: "2026-11-05" }],
+    at: new Date().toISOString(), expired: false };
+}
+const topicFcFixtures = (source: "dcbest" | "blind"): BestTopic[] => {
+  const titles = ["공공 지원금 전면 폐지 확정이라는 글", "도심 행사 사고 규모를 과장한 글", "출처 없이 퍼진 통계 이야기", "새 교통 정책 발표 소식", "주말 산책하다 만난 고양이", "하루 전 확인한 정책 변경 소식", "지역 행사 일정 변경 보도", "동네 물가 조사 결과"];
+  const size = topicFcCase === "capped" ? 70 : titles.length;
+  return Array.from({ length: size }, (_, i) => {
+    const no = source === "dcbest" ? 2900 + i : `topicfc-${i}`;
+    const key = topicFcKey(source, no);
+    if (!topicFcRecords.has(key)) {
+      const record = topicFcCase === "empty" ? topicFcGeneral() : topicFcCase === "checked" ? topicFcVerdict(i)
+        : i === 4 ? topicFcGeneral() : i < 4 ? topicFcVerdict(i)
+        : i === 5 ? { ...topicFcVerdict(3), chip: null, expired: true, at: new Date(Date.now() - 25 * 3600_000).toISOString() }
+        : null;
+      if (record) topicFcRecords.set(key, record);
+    }
+    return { ...BEST[0], no, title: `[가상] ${titles[i % titles.length]}${i >= titles.length ? ` ${i + 1}` : ""}`,
+      tag: source === "blind" ? "토픽 베스트" : "시사 예시", views: 90000 - i * 100, comments: 900 - i,
+      url: source === "blind" ? `https://www.teamblind.com/kr/post/${no}` : `https://gall.dcinside.com/board/view/?id=dcbest&no=${no}`,
+      category: null, source_check: false, source_check_reason: null, made: null, hidden: false, hidden_reason: [] };
+  });
+};
+const topicFcLists = { dcbest: topicFcFixtures("dcbest"), blind: topicFcFixtures("blind") };
+function topicFcAnnotate(source: "dcbest" | "blind", items: BestTopic[]) {
+  const counts = { news: 0, checked: 0, doubt: 0 };
+  for (const item of items) {
+    item.fc = structuredClone(topicFcRecords.get(topicFcKey(source, item.no)) ?? null);
+    if (item.fc && item.fc.kind !== "general") {
+      counts.news++;
+      if (item.fc.status && item.fc.status !== "failed" && !item.fc.expired) counts.checked++;
+      if (!item.fc.expired && item.fc.chip?.color === "bad") counts.doubt++;
+    }
+  }
+  return { fc_counts: counts, fc_ready: topicFcCase !== "unready", fc_note: topicFcCase === "unready" ? "OpenRouter 키가 있어야 합니다" : "" };
+}
+let topicFcState: TopicFcStatus = { run_id: null, source: null, state: "idle", done: 0, total: 0, cost_usd: 0, stop_reason: null, error: null, results: [] };
+const topicFcSnapshots = new Map<string, { source: "dcbest" | "blind"; nos: (string | number)[]; force: boolean; at: number }>();
+let topicFcWork: (string | number)[] = [];
+let topicFcTickAt = 0;
+function topicFcTick() {
+  if (topicFcState.state !== "running" && topicFcState.state !== "cancelling") return;
+  if (Date.now() - topicFcTickAt < 2200) return;
+  topicFcTickAt = Date.now();
+  const i = topicFcState.done;
+  const no = topicFcWork[i];
+  if (no !== undefined) {
+    topicFcRecords.set(topicFcKey(topicFcState.source!, no), topicFcVerdict(i));
+    topicFcState.done++; topicFcState.cost_usd = Number((topicFcState.done * 0.06).toFixed(2));
+  }
+  if (topicFcState.state === "cancelling") { topicFcState.state = "stopped"; topicFcState.stop_reason = "cancelled"; }
+  else if (topicFcCase === "failed") { topicFcState.state = "failed"; topicFcState.stop_reason = "storage_error"; topicFcState.error = "판정 기록 또는 비용 장부를 처리하지 못했습니다"; }
+  else if (topicFcCase === "stopped") { topicFcState.state = "stopped"; topicFcState.stop_reason = "daily_limit"; }
+  else if (topicFcState.done >= topicFcState.total) topicFcState.state = "done";
+}
+function topicFcStatus(): TopicFcStatus {
+  return { ...topicFcState, results: topicFcWork.flatMap((no) => {
+    const fc = topicFcRecords.get(topicFcKey(topicFcState.source!, no));
+    return fc?.status ? [{ no, fc: structuredClone(fc) }] : [];
+  }) };
+}
+function topicFcRequest(method: string, path: string, body: unknown) {
+  const fail = (message: string, code = 409): never => { throw new ApiError(message, code, { message }); };
+  if (path.endsWith("/status") && method === "GET") { topicFcTick(); return topicFcStatus(); }
+  if (path.endsWith("/cancel") && method === "POST") {
+    const run_id = (body as { run_id?: string } | undefined)?.run_id;
+    if (!run_id || run_id !== topicFcState.run_id) fail("다른 판정 실행이라 멈추지 않았습니다");
+    if (topicFcState.state === "running") topicFcState.state = "cancelling";
+    return topicFcStatus();
+  }
+  if (path.endsWith("/estimate") && method === "POST") {
+    if (topicFcCase.startsWith("error")) {
+      const code = Number(topicFcCase.slice(5));
+      fail(({ 400: "소재 견적 요청이 올바르지 않습니다", 409: "목록이 바뀌어 다시 눌러 주세요", 502: "소재 분류를 마치지 못했습니다. 다시 눌러 주세요" } as Record<number, string>)[code] ?? "목업 오류", code);
+    }
+    if (topicFcCase === "unready") fail("OpenRouter 키가 있어야 합니다");
+    const { source, nos, force = false } = body as { source: "dcbest" | "blind"; nos: (string | number)[]; force?: boolean };
+    if (!Array.isArray(nos) || nos.length > 200 || !topicFcLists[source]) fail("소재 견적 요청이 올바르지 않습니다", 400);
+    const unique = [...new Map(nos.map((no) => [String(no), no])).values()];
+    const missing = unique.filter((no) => !topicFcRecords.has(topicFcKey(source, no)));
+    const params = new URLSearchParams(location.search);
+    const kind = params.get("topicfc_kind") ?? (topicFcCase === "empty" ? "general" : "uncertain");
+    for (const no of missing) topicFcRecords.set(topicFcKey(source, no), {
+      ...topicFcGeneral(), kind: kind === "general" || kind === "news" ? kind : "uncertain",
+    });
+    const chosenCost = Number(params.get("topicfc_classification_usd") ?? Math.ceil(missing.length / 30) * 0.01);
+    const classification_usd = missing.length && Number.isFinite(chosenCost) && chosenCost >= 0 ? chosenCost : 0;
+    const news = unique.filter((no) => topicFcRecords.get(topicFcKey(source, no))!.kind !== "general");
+    const todo = news.filter((no) => { const rec = topicFcRecords.get(topicFcKey(source, no))!; return force || rec.expired || !rec.status || rec.status === "failed"; });
+    const run_id = `mock-topicfc-${Date.now()}-${topicFcSnapshots.size}`;
+    const selected_nos = todo.slice(0, 30);
+    topicFcSnapshots.set(run_id, { source, nos: selected_nos, force, at: Date.now() });
+    return { run_id, news: news.length, done: news.length - todo.length, todo: selected_nos.length,
+      classification_usd, est_usd: selected_nos.length * 0.08, per_item_usd: 0.08, capped: todo.length > 30, selected_nos } satisfies TopicFcEstimate;
+  }
+  if (path.endsWith("/run") && method === "POST") {
+    if (topicFcState.state === "running" || topicFcState.state === "cancelling") fail("이미 사실 확인 중입니다");
+    const { run_id } = body as { run_id: string };
+    const snap = topicFcSnapshots.get(run_id);
+    if (!snap || Date.now() - snap.at >= 600_000) return fail("목록이 바뀌어 다시 눌러 주세요");
+    topicFcWork = snap.nos.filter((no) => { const rec = topicFcRecords.get(topicFcKey(snap.source, no))!; return snap.force || rec.expired || !rec.status || rec.status === "failed"; });
+    topicFcState = { run_id, source: snap.source, state: topicFcWork.length ? "running" : "done", done: 0, total: topicFcWork.length, cost_usd: 0, stop_reason: null, error: null, results: [] };
+    topicFcTickAt = Date.now(); topicFcSnapshots.delete(run_id);
+    return { started: true, total: topicFcWork.length, run_id };
+  }
+  return fail("소재 판정 요청이 올바르지 않습니다", 400);
+}
 
 // ---- 설정(계약서 §2~§5). 처음에는 Gemini 키가 없어서 홈 화면에 "키 넣기" 안내가 뜬다. ----
 const KEY_DEFS: [string, string, string, boolean, string][] = [
@@ -420,24 +542,27 @@ export async function mockRequest<T>(method: string, path: string, body?: unknow
     }
     return ok(settingsView());
   }
+  if (p.startsWith("/api/topics/factcheck/")) return ok(topicFcRequest(method, p, body));
   if (p === "/api/topics/refresh" || (p === "/api/topics" && (path.includes("source=dcbest") || path.includes("source=blind")))) {
     await wait(500);
     const src = path.includes("source=blind") || (body as { source?: string } | undefined)?.source === "blind" ? "blind" : "dcbest";
+    const query = new URLSearchParams(path.split("?")[1]);
+    const hours = Number(query.get("hours") ?? (body as { hours?: number } | undefined)?.hours ?? 48);
+    const pages = src === "blind" ? 1 : Number(query.get("pages") ?? (body as { pages?: number } | undefined)?.pages ?? 3);
+    const fetched_at = topicFcCase === "expired-cache" ? iso(11) : iso(1);
     const sort = (/sort=(\w+)/.exec(path)?.[1] ?? (body as { sort?: string } | undefined)?.sort ?? "views") as "views" | "comments" | "recent";
-    if (src === "blind") {      // 블라인드: Clef 분류 없음(triage skipped), 쪽 넘김 없음 — 화면 확인용 가짜 두 줄
-      return ok({ source: "blind", sort, hours: 48, pages: 1, fetched_at: iso(1), triage: "skipped",
-        triage_note: "블라인드는 Clef 분류 없이 그대로 보여 줍니다", hidden_count: 0,
-        items: [{ no: "aaaa0001", title: "[가상] 회사 근처 점심값이 2년 만에 두 배가 된 이유", tag: "블라블라", views: 12840, recommends: 41, comments: 96, posted_at: iso(180), age_hours: 3, url: "https://www.teamblind.com/kr/post/aaaa0001", category: null, hidden: false, hidden_reason: [], triaged: false, source_check: false, source_check_reason: null, made: null },
-          { no: "bbbb0002", title: "[가상] 요즘 신입이 첫 월급으로 가장 많이 산 것", tag: "토픽 베스트", views: 7320, recommends: 25, comments: 33, posted_at: iso(540), age_hours: 9, url: "https://www.teamblind.com/kr/post/bbbb0002", category: null, hidden: false, hidden_reason: [], triaged: false, source_check: false, source_check_reason: null, made: null }],
-        channel: null, fit: "off", fit_note: "", unfit_count: 0 } satisfies BestResponse);
-    }
-    let items: BestTopic[] = [...BEST].sort((a, b) => sort === "comments" ? b.comments - a.comments : sort === "recent" ? a.age_hours - b.age_hours : b.views - a.views);
+    let items: BestTopic[] = [...topicFcLists[src].map((t) => ({ ...t })), ...(src === "dcbest" ? BEST.map((t) => ({ ...t })) : [])]
+      .sort((a, b) => sort === "comments" ? b.comments - a.comments : sort === "recent" ? a.age_hours - b.age_hours : b.views - a.views);
+    const fcExtra = topicFcAnnotate(src, items);
+    if (src === "blind") return ok({ source: src, sort, hours, pages, fetched_at, triage: "skipped",
+      triage_note: "블라인드는 Clef 분류 없이 그대로 보여 줍니다", hidden_count: 0, items,
+      channel: null, fit: "off", fit_note: "", unfit_count: 0, ...fcExtra } satisfies BestResponse);
     const label = channelView().label;
     if (channel.main_topic && label) {     // 서버처럼: 딱 맞음 → 조금 → 아님, 같은 묶음 안은 원래 순서
-      items = items.map((i) => ({ ...i, fit: BEST_FIT[Number(i.no)] })).sort((a, b) => (b.fit ?? 0) - (a.fit ?? 0));
+      items = items.map((i) => ({ ...i, fit: BEST_FIT[Number(i.no)] ?? 2 })).sort((a, b) => (b.fit ?? 0) - (a.fit ?? 0));
     }
     const madeN = items.filter((i) => i.made);
-    return ok({ source: "dcbest", sort, hours: 48, pages: 3, fetched_at: iso(1), triage: "ok", triage_note: "", hidden_count: items.filter((i) => i.hidden).length, items,
+    return ok({ source: "dcbest", sort, hours, pages, fetched_at, ...fcExtra, triage: "ok", triage_note: "", hidden_count: items.filter((i) => i.hidden).length, items,
       made_count: madeN.length, made_same_count: madeN.filter((i) => i.made!.kind === "same_post").length, made_hidden: 0,
       channel: channel.main_topic && label ? { main_topic: channel.main_topic, label } : null, fit: channel.main_topic ? "ok" : "off", fit_note: "", unfit_count: items.filter((i) => i.fit === 0).length });
   }

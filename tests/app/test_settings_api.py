@@ -18,7 +18,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(provider, "local_server_up", lambda: False)
     app = create_app(work_root=tmp_path, deps=FakeDeps(), start_runner=False)
     # 앱은 127.0.0.1 에서 뜬다. TestClient 기본 host(testserver)는 로컬 전용 지킴이에 막히므로 로컬 주소로.
-    with TestClient(app, base_url="http://127.0.0.1:8020") as c:
+    with TestClient(app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1:8020") as c:
         yield c
 
 

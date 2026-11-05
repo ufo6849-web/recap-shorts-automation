@@ -485,7 +485,7 @@ def fake_client(tmp_path, monkeypatch):
     monkeypatch.setattr(provider, "local_available", lambda *a, **k: False)
     monkeypatch.setattr(provider, "local_server_up", lambda: False)
     app = create_app(work_root=tmp_path, deps=FakeDeps(), start_runner=False)
-    with TestClient(app, base_url="http://127.0.0.1:8020") as c:
+    with TestClient(app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1:8020") as c:
         yield c
 
 
@@ -496,7 +496,7 @@ def real_client(tmp_path, monkeypatch):
     monkeypatch.setattr(provider, "local_available", lambda *a, **k: False)
     monkeypatch.setattr(provider, "local_server_up", lambda: False)
     app = create_app(work_root=tmp_path, deps=P.Deps(), start_runner=False)
-    with TestClient(app, base_url="http://127.0.0.1:8020") as c:
+    with TestClient(app, client=("127.0.0.1", 50000), base_url="http://127.0.0.1:8020") as c:
         yield c, app
 
 
