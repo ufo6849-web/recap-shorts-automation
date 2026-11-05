@@ -1081,6 +1081,51 @@ def test_clean_why_preserves_text_and_removes_only_link_citations(raw, expected)
     assert T._clean_why(raw) == expected
 
 
+@pytest.mark.parametrize("raw,expected", [
+    ("근거 https://example.com/path입니다.", "근거 입니다."),
+    ("근거 https://example.com/a(b)c입니다.", "근거 입니다."),
+    ("근거 https://example.com/path는 확인했습니다.", "근거 는 확인했습니다."),
+    ("근거 https://example.com/한국어/경로입니다.", "근거 한국어/경로입니다."),
+    ("근거 https://example.com/pathé입니다.", "근거 é입니다."),
+    ("근거 https://example.com/%EA%B0%80입니다.", "근거 입니다."),
+])
+def test_clean_why_bare_url_stops_at_first_non_ascii(raw, expected):
+    assert T._clean_why(raw) == expected
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("[기사[해설]](https://x.y)는 근거입니다.", "기사[해설]는 근거입니다."),
+    (r"[기사\[해설\]](https://x.y)는 근거입니다.", "기사[해설]는 근거입니다."),
+    ("[기사(해설)](https://x.y)는 근거입니다.", "기사(해설)는 근거입니다."),
+    ("[기사[해설[상세]]](https://x.y/a(b))", "기사[해설[상세]]"),
+    (r"[기사\]해설](https://x.y)", "기사]해설"),
+    (r"[기사\[해설](https://x.y)", "기사[해설"),
+    (r"[기사\\[해설]](https://x.y)", r"기사\\[해설]"),
+    (r"[기사\q](https://x.y)", r"기사\q"),
+    (r"근거([기사[해설]](https://x.y), [자료\[상세\]](https://z.y))입니다.", "근거입니다."),
+    ("근거([기사[해설]](https://x.y), 추가 설명)입니다.", "근거(기사[해설], 추가 설명)입니다."),
+    (r"근거(참고([기사\[해설\]](https://x.y)))입니다.", "근거(참고)입니다."),
+])
+def test_clean_why_nested_and_escaped_link_labels(raw, expected):
+    assert T._clean_why(raw) == expected
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("[" * 5000 + "](https://x.y)", "[" * 4999),
+    (r"\[" * 5000, r"\[" * 5000),
+    ("https://a.b/" + "가" * 5000, "가" * 5000),
+    ("[" * 5000 + "기사" + "](https://x.y)" * 5000,
+     "[" * 4999 + "기사" + "]()" * 4999),
+], ids=["unclosed-labels-5000", "escaped-brackets-5000", "non-ascii-suffix-5000",
+        "overlapping-labels-5000"])
+def test_clean_why_new_adversarial_inputs_preserve_output_under_100ms(raw, expected):
+    start = time.perf_counter()
+    actual = T._clean_why(raw)
+    elapsed = time.perf_counter() - start
+    assert actual == expected
+    assert elapsed < 0.1, f"{len(raw)} characters took {elapsed:.6f}s"
+
+
 @pytest.mark.parametrize("raw", [
     "(" + "a.aa" * 25 + "!",
     "(" + "a.aa" * 5000 + "!",

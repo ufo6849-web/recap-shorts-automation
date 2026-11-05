@@ -189,18 +189,32 @@ def _clean_why(why: str | None) -> str | None:
     # 괄호 짝과 URL 금지 문자 누계를 미리 계산해 실패한 링크도 재탐색하지 않는다.
     closes: dict[int, int] = {}
     stack: list[int] = []
+    label_closes: dict[int, int] = {}
+    label_stack: list[int] = []
+    escaped = False
     forbidden = [0]
     for i, char in enumerate(why):
         if char == "(":
             stack.append(i)
         elif char == ")" and stack:
             closes[stack.pop()] = i
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "[":
+            label_stack.append(i)
+        elif char == "]" and label_stack:
+            label_closes[label_stack.pop()] = i
         forbidden.append(forbidden[-1] + int(char.isspace() or char in "<>"))
     links = {}
-    for match in re.finditer(r"\[([^\[\]]*)\]\((?=https?://)", why):
-        end = closes.get(match.end() - 1)
-        if end is not None and forbidden[end] == forbidden[match.end()]:
-            links[match.start()] = (end + 1, match[1])
+    for start, label_end in label_closes.items():
+        if not (why.startswith("](http://", label_end) or why.startswith("](https://", label_end)):
+            continue
+        end = closes.get(label_end + 1)
+        if end is not None and forbidden[end] == forbidden[label_end + 2]:
+            # 겹친 라벨을 미리 복사하면 이차 시간이 된다. 위치만 보관한다.
+            links[start] = (end + 1, label_end)
 
     # 링크를 하나의 토큰으로 취급한다. '(' 공백? 링크 (',' 링크)* 공백? ')'만 제거.
     parts: list[str] = []
@@ -210,7 +224,11 @@ def _clean_why(why: str | None) -> str | None:
     while i < len(why):
         link = links.get(i)
         if link is not None:
-            i, label = link
+            end, label_end = link
+            # 선택된 (서로 겹치지 않는) 라벨만 읽고 대괄호 이스케이프를 푼다.
+            label = re.sub(r"\\(.)", lambda m: m[1] if m[1] in "[]" else m[0],
+                           why[i + 1:label_end], flags=re.DOTALL)
+            i = end
             parts.append(label)
             if citation_start is not None and not after_link:
                 after_link = True
@@ -234,7 +252,8 @@ def _clean_why(why: str | None) -> str | None:
         parts.append(char)
         i += 1
 
-    # 맨 URL은 균형 괄호까지 소비한다. 짝 없는 ')'와 끝 문장부호는 본문에 남긴다.
+    # 맨 URL은 ASCII만 소비한다. 날 비ASCII 경로는 지원하지 않고 본문으로 남긴다.
+    # 균형 괄호까지 소비하되 짝 없는 ')'와 끝 문장부호는 본문에 남긴다.
     text = "".join(parts)
     parts = []
     i = 0
@@ -245,7 +264,7 @@ def _clean_why(why: str | None) -> str | None:
             continue
         start = i
         depth = 0
-        while i < len(text) and not text[i].isspace() and text[i] not in "<>":
+        while i < len(text) and text[i].isascii() and not text[i].isspace() and text[i] not in "<>":
             char = text[i]
             if char == "(":
                 depth += 1
